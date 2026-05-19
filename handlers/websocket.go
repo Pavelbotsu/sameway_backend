@@ -1,4 +1,4 @@
-package handlers
+﻿package handlers
 
 import (
 	"encoding/json"
@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/Pavelbotsu/rideshare-backend/middleware"
-	"github.com/Pavelbotsu/rideshare-backend/models"
+	"github.com/Pavelbotsu/sameway_backend/middleware"
+	"github.com/Pavelbotsu/sameway_backend/models"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 )

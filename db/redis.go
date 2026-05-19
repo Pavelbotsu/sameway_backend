@@ -1,10 +1,10 @@
-package db
+﻿package db
 
 import (
 	"context"
 	"fmt"
 
-	"github.com/Pavelbotsu/rideshare-backend/config"
+	"github.com/Pavelbotsu/sameway_backend/config"
 	"github.com/redis/go-redis/v9"
 )
 

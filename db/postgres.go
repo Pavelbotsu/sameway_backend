@@ -1,10 +1,10 @@
-package db
+﻿package db
 
 import (
 	"context"
 	"fmt"
 
-	"github.com/Pavelbotsu/rideshare-backend/config"
+	"github.com/Pavelbotsu/sameway_backend/config"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -73,6 +73,51 @@ func Migrate() error {
 			created_at TIMESTAMPTZ DEFAULT NOW(),
 			UNIQUE(driver_id, passenger_id)
 		);
+
+		CREATE TABLE IF NOT EXISTS completed_trips (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			ride_request_id UUID REFERENCES ride_requests(id) ON DELETE SET NULL,
+			driver_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			passenger_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			distance_km FLOAT NOT NULL DEFAULT 0,
+			co2_saved_kg FLOAT NOT NULL DEFAULT 0,
+			completed_at TIMESTAMPTZ DEFAULT NOW()
+		);
+
+		CREATE TABLE IF NOT EXISTS messages (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			ride_request_id UUID NOT NULL REFERENCES ride_requests(id) ON DELETE CASCADE,
+			sender_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			content TEXT NOT NULL,
+			created_at TIMESTAMPTZ DEFAULT NOW()
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_messages_request
+			ON messages (ride_request_id, created_at);
+
+		CREATE TABLE IF NOT EXISTS planned_trips (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			driver_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			origin_name TEXT NOT NULL,
+			origin GEOGRAPHY(POINT,4326) NOT NULL,
+			destination_name TEXT NOT NULL,
+			destination GEOGRAPHY(POINT,4326) NOT NULL,
+			route GEOGRAPHY(LINESTRING,4326),
+			seats INT NOT NULL DEFAULT 1,
+			corridor_km FLOAT NOT NULL DEFAULT 2.0,
+			distance_km FLOAT NOT NULL DEFAULT 0,
+			planned_at TIMESTAMPTZ NOT NULL,
+			status TEXT NOT NULL DEFAULT 'open'
+				CHECK (status IN ('open','full','cancelled','done')),
+			created_at TIMESTAMPTZ DEFAULT NOW()
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_planned_trips_origin
+			ON planned_trips USING GIST(origin);
+		CREATE INDEX IF NOT EXISTS idx_planned_trips_destination
+			ON planned_trips USING GIST(destination);
+		CREATE INDEX IF NOT EXISTS idx_planned_trips_planned_at
+			ON planned_trips (planned_at);
 	`)
 	return err
 }

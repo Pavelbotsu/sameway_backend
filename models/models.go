@@ -1,4 +1,4 @@
-package models
+﻿package models
 
 import "time"
 
@@ -28,6 +28,10 @@ type User struct {
 	Password  string    `json:"-"`
 	Role      string    `json:"role"`
 	FCMToken  string    `json:"fcm_token,omitempty"`
+	CarMake   string    `json:"car_make,omitempty"`
+	CarModel  string    `json:"car_model,omitempty"`
+	CarColor  string    `json:"car_color,omitempty"`
+	CarPlate  string    `json:"car_plate,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -66,4 +70,31 @@ type RideRequest struct {
 type WSMessage struct {
 	Type    string      `json:"type"`
 	Payload interface{} `json:"payload"`
+}
+
+type Message struct {
+	ID            string    `json:"id"`
+	RideRequestID string    `json:"ride_request_id"`
+	SenderID      string    `json:"sender_id"`
+	Content       string    `json:"content"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+type PlannedTrip struct {
+	ID              string    `json:"id"`
+	DriverID        string    `json:"driver_id"`
+	DriverName      string    `json:"driver_name"`
+	CarSummary      string    `json:"car_summary"`
+	OriginName      string    `json:"origin_name"`
+	OriginLat       float64   `json:"origin_lat"`
+	OriginLng       float64   `json:"origin_lng"`
+	DestinationName string    `json:"destination_name"`
+	DestLat         float64   `json:"dest_lat"`
+	DestLng         float64   `json:"dest_lng"`
+	Seats           int       `json:"seats"`
+	CorridorKm      float64   `json:"corridor_km"`
+	DistanceKm      float64   `json:"distance_km"`
+	PlannedAt       time.Time `json:"planned_at"`
+	Status          string    `json:"status"`
+	CreatedAt       time.Time `json:"created_at"`
 }

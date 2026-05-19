@@ -1,11 +1,11 @@
-package services
+﻿package services
 
 import (
 	"context"
 	"fmt"
 
-	"github.com/Pavelbotsu/rideshare-backend/db"
-	"github.com/Pavelbotsu/rideshare-backend/models"
+	"github.com/Pavelbotsu/sameway_backend/db"
+	"github.com/Pavelbotsu/sameway_backend/models"
 )
 
 func UpsertActiveDriver(driverID, routeWKT string, originLat, originLng, destLat, destLng, corridorKm float64, seats int) error {
@@ -145,6 +145,72 @@ func DeleteActiveDriver(driverID string) error {
 	_, err := db.DB.Exec(context.Background(),
 		`DELETE FROM active_drivers WHERE driver_id = $1`, driverID)
 	return err
+}
+
+type NearbyDriver struct {
+	DriverID   string  `json:"driver_id"`
+	DriverName string  `json:"driver_name"`
+	OriginLat  float64 `json:"origin_lat"`
+	OriginLng  float64 `json:"origin_lng"`
+	DestLat    float64 `json:"dest_lat"`
+	DestLng    float64 `json:"dest_lng"`
+	CorridorKm float64 `json:"corridor_km"`
+	Seats      int     `json:"seats"`
+	CarMake    string  `json:"car_make"`
+	CarModel   string  `json:"car_model"`
+	CarColor   string  `json:"car_color"`
+	CarPlate   string  `json:"car_plate"`
+	RouteWKT   string  `json:"route_wkt"`
+}
+
+// GetNearbyDrivers returns active drivers whose origin is within radiusKm of (lat, lng).
+// When destRadiusKm > 0, only drivers whose route passes within destRadiusKm of (destLat, destLng) are returned.
+func GetNearbyDrivers(lat, lng, radiusKm, destLat, destLng, destRadiusKm float64) ([]NearbyDriver, error) {
+	rows, err := db.DB.Query(context.Background(), `
+		SELECT ad.driver_id,
+		       u.name,
+		       ST_Y(ad.origin::geometry), ST_X(ad.origin::geometry),
+		       ST_Y(ad.destination::geometry), ST_X(ad.destination::geometry),
+		       ad.corridor_km, ad.seats,
+		       COALESCE(u.car_make,''), COALESCE(u.car_model,''),
+		       COALESCE(u.car_color,''), COALESCE(u.car_plate,''),
+		       COALESCE(ST_AsText(ad.route), '')
+		FROM active_drivers ad
+		JOIN users u ON u.id = ad.driver_id
+		WHERE ST_DWithin(
+			ad.origin::geography,
+			ST_MakePoint($2, $1)::geography,
+			$3 * 1000
+		)
+		AND ($6::float = 0 OR ST_DWithin(
+			ad.route::geography,
+			ST_MakePoint($5, $4)::geography,
+			$6 * 1000
+		))
+		AND ad.status = 'looking'
+		AND ad.created_at > NOW() - INTERVAL '30 minutes'
+	`, lat, lng, radiusKm, destLat, destLng, destRadiusKm)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var drivers []NearbyDriver
+	for rows.Next() {
+		var d NearbyDriver
+		if err := rows.Scan(
+			&d.DriverID, &d.DriverName,
+			&d.OriginLat, &d.OriginLng,
+			&d.DestLat, &d.DestLng,
+			&d.CorridorKm, &d.Seats,
+			&d.CarMake, &d.CarModel, &d.CarColor, &d.CarPlate,
+			&d.RouteWKT,
+		); err != nil {
+			return nil, err
+		}
+		drivers = append(drivers, d)
+	}
+	return drivers, rows.Err()
 }
 
 func GetActiveDriver(driverID string) (*models.ActiveDriver, error) {

@@ -1,4 +1,4 @@
-module github.com/Pavelbotsu/rideshare-backend
+module github.com/Pavelbotsu/sameway_backend
 
 go 1.26.3
 

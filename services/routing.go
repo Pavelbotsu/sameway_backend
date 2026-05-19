@@ -1,4 +1,4 @@
-package services
+﻿package services
 
 import (
 	"encoding/json"
@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/Pavelbotsu/rideshare-backend/config"
+	"github.com/Pavelbotsu/sameway_backend/config"
 )
 
 type RouteResult struct {

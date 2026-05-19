@@ -1,10 +1,10 @@
-package middleware
+﻿package middleware
 
 import (
 	"net/http"
 	"strings"
 
-	"github.com/Pavelbotsu/rideshare-backend/config"
+	"github.com/Pavelbotsu/sameway_backend/config"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 )

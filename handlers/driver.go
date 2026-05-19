@@ -1,12 +1,12 @@
-package handlers
+﻿package handlers
 
 import (
 	"context"
 	"net/http"
 
-	"github.com/Pavelbotsu/rideshare-backend/db"
-	"github.com/Pavelbotsu/rideshare-backend/models"
-	"github.com/Pavelbotsu/rideshare-backend/services"
+	"github.com/Pavelbotsu/sameway_backend/db"
+	"github.com/Pavelbotsu/sameway_backend/models"
+	"github.com/Pavelbotsu/sameway_backend/services"
 	"github.com/gin-gonic/gin"
 )
 
@@ -95,7 +95,8 @@ func GetRequests(c *gin.Context) {
 
 func UpdateStatus(c *gin.Context) {
 	var req struct {
-		Status string `json:"status" binding:"required,oneof=looking full in_progress done"`
+		Status     string  `json:"status" binding:"required,oneof=looking full in_progress done"`
+		DistanceKm float64 `json:"distance_km"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -105,6 +106,21 @@ func UpdateStatus(c *gin.Context) {
 	if err := services.UpdateDriverStatus(driverID, req.Status); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
+	}
+	if req.Status == "done" && req.DistanceKm > 0 {
+		rows, err := db.DB.Query(context.Background(), `
+			SELECT id, passenger_id FROM ride_requests
+			WHERE driver_id = $1 AND status = 'accepted'
+		`, driverID)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var reqID, passengerID string
+				if rows.Scan(&reqID, &passengerID) == nil {
+					services.RecordCompletedTrip(reqID, driverID, passengerID, req.DistanceKm)
+				}
+			}
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

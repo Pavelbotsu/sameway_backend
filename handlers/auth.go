@@ -1,11 +1,13 @@
-package handlers
+﻿package handlers
 
 import (
 	"context"
 	"net/http"
 
-	"github.com/Pavelbotsu/rideshare-backend/db"
-	"github.com/Pavelbotsu/rideshare-backend/middleware"
+	"github.com/Pavelbotsu/sameway_backend/db"
+	"github.com/Pavelbotsu/sameway_backend/middleware"
+	"github.com/Pavelbotsu/sameway_backend/models"
+	"github.com/Pavelbotsu/sameway_backend/services"
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -77,6 +79,95 @@ func Login(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"token": token, "user_id": id, "role": role})
+}
+
+func GetProfile(c *gin.Context) {
+	userID := c.GetString("user_id")
+	var u models.User
+	err := db.DB.QueryRow(context.Background(), `
+		SELECT id, name, email, role,
+		       COALESCE(car_make,''), COALESCE(car_model,''),
+		       COALESCE(car_color,''), COALESCE(car_plate,'')
+		FROM users WHERE id = $1`, userID,
+	).Scan(&u.ID, &u.Name, &u.Email, &u.Role,
+		&u.CarMake, &u.CarModel, &u.CarColor, &u.CarPlate)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	c.JSON(http.StatusOK, u)
+}
+
+func UpdateProfile(c *gin.Context) {
+	var req struct {
+		Name     string `json:"name"`
+		CarMake  string `json:"car_make"`
+		CarModel string `json:"car_model"`
+		CarColor string `json:"car_color"`
+		CarPlate string `json:"car_plate"`
+	}
+	c.ShouldBindJSON(&req)
+	userID := c.GetString("user_id")
+	_, err := db.DB.Exec(context.Background(), `
+		UPDATE users SET
+		    name      = CASE WHEN $1 <> '' THEN $1 ELSE name END,
+		    car_make  = $2,
+		    car_model = $3,
+		    car_color = $4,
+		    car_plate = $5
+		WHERE id = $6`,
+		req.Name, req.CarMake, req.CarModel, req.CarColor, req.CarPlate, userID,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func SwitchRole(c *gin.Context) {
+	var req struct {
+		Role string `json:"role" binding:"required,oneof=driver passenger"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	userID := c.GetString("user_id")
+	token, err := middleware.GenerateToken(userID, req.Role)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"token": token, "role": req.Role, "user_id": userID})
+}
+
+func FCMStatus(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"fcm_enabled": services.IsFCMReady()})
+}
+
+func TestNotification(c *gin.Context) {
+	userID := c.GetString("user_id")
+	var fcmToken string
+	db.DB.QueryRow(context.Background(),
+		`SELECT COALESCE(fcm_token, '') FROM users WHERE id = $1`, userID,
+	).Scan(&fcmToken)
+
+	if err := services.SendTestNotification(fcmToken); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func GetStats(c *gin.Context) {
+	userID := c.GetString("user_id")
+	stats, err := services.GetUserStats(userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	c.JSON(http.StatusOK, stats)
 }
 
 func UpdateFCMToken(c *gin.Context) {
