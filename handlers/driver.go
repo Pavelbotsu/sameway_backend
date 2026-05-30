@@ -107,7 +107,7 @@ func UpdateStatus(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
-	if req.Status == "done" && req.DistanceKm > 0 {
+	if req.Status == "done" {
 		rows, err := db.DB.Query(context.Background(), `
 			SELECT id, passenger_id FROM ride_requests
 			WHERE driver_id = $1 AND status = 'accepted'
@@ -117,11 +117,45 @@ func UpdateStatus(c *gin.Context) {
 			for rows.Next() {
 				var reqID, passengerID string
 				if rows.Scan(&reqID, &passengerID) == nil {
-					services.RecordCompletedTrip(reqID, driverID, passengerID, req.DistanceKm)
+					if req.DistanceKm > 0 {
+						services.RecordCompletedTrip(reqID, driverID, passengerID, req.DistanceKm)
+					}
+					Hub.SendToUser(passengerID, "ride_done", gin.H{
+						"request_id": reqID,
+						"driver_id":  driverID,
+					})
 				}
 			}
+			db.DB.Exec(context.Background(),
+				`UPDATE ride_requests SET status = 'cancelled' WHERE driver_id = $1 AND status = 'accepted'`,
+				driverID,
+			)
 		}
 	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func DriverCancelRide(c *gin.Context) {
+	requestID := c.Param("request_id")
+	driverID := c.GetString("user_id")
+
+	var passengerID string
+	err := db.DB.QueryRow(context.Background(),
+		`UPDATE ride_requests SET status = 'cancelled'
+		 WHERE id = $1 AND driver_id = $2 AND status = 'accepted'
+		 RETURNING passenger_id`,
+		requestID, driverID,
+	).Scan(&passengerID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ride not found or already cancelled"})
+		return
+	}
+
+	Hub.SendToUser(passengerID, "ride_cancelled", gin.H{
+		"request_id":   requestID,
+		"cancelled_by": "driver",
+	})
+
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 

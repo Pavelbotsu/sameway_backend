@@ -38,7 +38,11 @@ func main() {
 		auth.GET("/fcm-status", middleware.Auth(), handlers.FCMStatus)
 		auth.POST("/test-notification", middleware.Auth(), handlers.TestNotification)
 		auth.GET("/stats", middleware.Auth(), handlers.GetStats)
+		auth.POST("/change-password", middleware.Auth(), handlers.ChangePassword)
+		auth.GET("/trips", middleware.Auth(), handlers.GetTripHistory)
 	}
+
+	r.POST("/ratings", middleware.Auth(), handlers.SubmitRating)
 
 	driver := r.Group("/driver", middleware.Auth(), middleware.RequireRole("driver"))
 	{
@@ -47,6 +51,7 @@ func main() {
 		driver.GET("/requests", handlers.GetRequests)
 		driver.PUT("/status", handlers.UpdateStatus)
 		driver.DELETE("/route", handlers.DeleteRoute)
+		driver.DELETE("/ride/:request_id", handlers.DriverCancelRide)
 		driver.POST("/trips", handlers.PlanTrip)
 		driver.GET("/trips", handlers.GetMyPlannedTrips)
 		driver.DELETE("/trips/:id", handlers.CancelPlannedTrip)
@@ -59,6 +64,7 @@ func main() {
 		passenger.POST("/nearby-drivers", handlers.NearbyDrivers)
 		passenger.POST("/request-driver", handlers.RequestDriver)
 		passenger.DELETE("/active", handlers.GoOffline)
+		passenger.DELETE("/ride/:request_id", handlers.PassengerCancelRide)
 	}
 
 	chat := r.Group("/chat", middleware.Auth())

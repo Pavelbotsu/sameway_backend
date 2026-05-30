@@ -127,6 +127,30 @@ func RequestDriver(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true, "request_id": requestID})
 }
 
+func PassengerCancelRide(c *gin.Context) {
+	requestID := c.Param("request_id")
+	passengerID := c.GetString("user_id")
+
+	var driverID string
+	err := db.DB.QueryRow(context.Background(),
+		`UPDATE ride_requests SET status = 'cancelled'
+		 WHERE id = $1 AND passenger_id = $2 AND status = 'accepted'
+		 RETURNING driver_id`,
+		requestID, passengerID,
+	).Scan(&driverID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ride not found or already cancelled"})
+		return
+	}
+
+	Hub.SendToUser(driverID, "ride_cancelled", gin.H{
+		"request_id":   requestID,
+		"cancelled_by": "passenger",
+	})
+
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
 func GoOffline(c *gin.Context) {
 	passengerID := c.GetString("user_id")
 	if err := services.DeleteActivePassenger(passengerID); err != nil {

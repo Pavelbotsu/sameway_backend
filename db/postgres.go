@@ -118,6 +118,17 @@ func Migrate() error {
 			ON planned_trips USING GIST(destination);
 		CREATE INDEX IF NOT EXISTS idx_planned_trips_planned_at
 			ON planned_trips (planned_at);
+
+		CREATE TABLE IF NOT EXISTS ratings (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			rater_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			rated_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			ride_request_id UUID NOT NULL REFERENCES ride_requests(id) ON DELETE CASCADE,
+			stars SMALLINT NOT NULL CHECK (stars BETWEEN 1 AND 5),
+			comment TEXT,
+			created_at TIMESTAMPTZ DEFAULT NOW(),
+			UNIQUE(rater_id, ride_request_id)
+		);
 	`)
 	return err
 }

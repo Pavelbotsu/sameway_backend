@@ -3,6 +3,7 @@
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/Pavelbotsu/sameway_backend/db"
 	"github.com/Pavelbotsu/sameway_backend/middleware"
@@ -45,7 +46,7 @@ func Register(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
-	c.JSON(http.StatusCreated, gin.H{"token": token, "user_id": id, "role": req.Role})
+	c.JSON(http.StatusCreated, gin.H{"token": token, "user_id": id, "role": req.Role, "name": req.Name, "email": req.Email})
 }
 
 func Login(c *gin.Context) {
@@ -58,11 +59,11 @@ func Login(c *gin.Context) {
 		return
 	}
 
-	var id, hash, role string
+	var id, hash, role, name string
 	err := db.DB.QueryRow(context.Background(),
-		`SELECT id, password, role FROM users WHERE email = $1`,
+		`SELECT id, password, role, name FROM users WHERE email = $1`,
 		req.Email,
-	).Scan(&id, &hash, &role)
+	).Scan(&id, &hash, &role, &name)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return
@@ -78,7 +79,7 @@ func Login(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"token": token, "user_id": id, "role": role})
+	c.JSON(http.StatusOK, gin.H{"token": token, "user_id": id, "role": role, "name": name, "email": req.Email})
 }
 
 func GetProfile(c *gin.Context) {
@@ -95,7 +96,59 @@ func GetProfile(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
-	c.JSON(http.StatusOK, u)
+	var avgRating float64
+	var ratingCount int
+	db.DB.QueryRow(context.Background(),
+		`SELECT COALESCE(AVG(stars),0), COUNT(*) FROM ratings WHERE rated_id = $1`,
+		userID,
+	).Scan(&avgRating, &ratingCount)
+	c.JSON(http.StatusOK, gin.H{
+		"id":           u.ID,
+		"name":         u.Name,
+		"email":        u.Email,
+		"role":         u.Role,
+		"car_make":     u.CarMake,
+		"car_model":    u.CarModel,
+		"car_color":    u.CarColor,
+		"car_plate":    u.CarPlate,
+		"avg_rating":   avgRating,
+		"rating_count": ratingCount,
+	})
+}
+
+func GetTripHistory(c *gin.Context) {
+	userID := c.GetString("user_id")
+	rows, err := db.DB.Query(context.Background(), `
+		SELECT id, driver_id, passenger_id, distance_km, co2_saved_kg, completed_at
+		FROM completed_trips
+		WHERE driver_id = $1 OR passenger_id = $1
+		ORDER BY completed_at DESC
+		LIMIT 50
+	`, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	defer rows.Close()
+
+	type tripItem struct {
+		ID          string  `json:"id"`
+		DriverID    string  `json:"driver_id"`
+		PassengerID string  `json:"passenger_id"`
+		DistanceKm  float64 `json:"distance_km"`
+		CO2SavedKg  float64 `json:"co2_saved_kg"`
+		CompletedAt string  `json:"completed_at"`
+	}
+	trips := []tripItem{}
+	for rows.Next() {
+		var t tripItem
+		var completedAt time.Time
+		if err := rows.Scan(&t.ID, &t.DriverID, &t.PassengerID, &t.DistanceKm, &t.CO2SavedKg, &completedAt); err == nil {
+			t.CompletedAt = completedAt.UTC().Format(time.RFC3339)
+			trips = append(trips, t)
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"trips": trips, "user_id": userID})
 }
 
 func UpdateProfile(c *gin.Context) {
@@ -155,6 +208,43 @@ func TestNotification(c *gin.Context) {
 
 	if err := services.SendTestNotification(fcmToken); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func ChangePassword(c *gin.Context) {
+	var req struct {
+		CurrentPassword string `json:"current_password" binding:"required"`
+		NewPassword     string `json:"new_password" binding:"required,min=6"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	userID := c.GetString("user_id")
+	var hash string
+	err := db.DB.QueryRow(context.Background(),
+		`SELECT password FROM users WHERE id = $1`, userID,
+	).Scan(&hash)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.CurrentPassword)); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "current password is incorrect"})
+		return
+	}
+	newHash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	_, err = db.DB.Exec(context.Background(),
+		`UPDATE users SET password = $1 WHERE id = $2`, string(newHash), userID,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
