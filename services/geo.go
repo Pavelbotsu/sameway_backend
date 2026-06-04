@@ -24,13 +24,14 @@ func UpsertActiveDriver(driverID, routeWKT string, originLat, originLng, destLat
 			route       = EXCLUDED.route,
 			corridor_km = EXCLUDED.corridor_km,
 			seats       = EXCLUDED.seats,
+			seats_taken = 0,
 			status      = 'looking',
 			created_at  = NOW()
 	`, driverID, originLat, originLng, destLat, destLng, routeWKT, corridorKm, seats)
 	return err
 }
 
-func FindPassengersInCorridor(routeWKT string, corridorKm float64) ([]models.User, error) {
+func FindPassengersInCorridor(routeWKT string, corridorKm float64, limit int) ([]models.User, error) {
 	rows, err := db.DB.Query(context.Background(), `
 		SELECT u.id, u.name, u.fcm_token,
 		       ST_Y(ap.location::geometry) AS lat,
@@ -43,7 +44,14 @@ func FindPassengersInCorridor(routeWKT string, corridorKm float64) ([]models.Use
 			$2 * 1000
 		)
 		AND ap.updated_at > NOW() - INTERVAL '10 minutes'
-	`, routeWKT, corridorKm)
+		AND NOT EXISTS (
+			SELECT 1 FROM ride_requests rr
+			WHERE rr.passenger_id = u.id
+			  AND rr.status IN ('pending','accepted')
+		)
+		ORDER BY ST_Distance(ap.location::geography, ST_GeogFromText($1)) ASC
+		LIMIT $3
+	`, routeWKT, corridorKm, limit)
 	if err != nil {
 		return nil, fmt.Errorf("corridor query: %w", err)
 	}

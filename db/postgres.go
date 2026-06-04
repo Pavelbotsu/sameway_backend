@@ -130,5 +130,16 @@ func Migrate() error {
 			UNIQUE(rater_id, ride_request_id)
 		);
 	`)
+	if err != nil {
+		return err
+	}
+
+	_, err = DB.Exec(context.Background(), `
+		ALTER TABLE users ADD COLUMN IF NOT EXISTS car_make TEXT DEFAULT '';
+		ALTER TABLE users ADD COLUMN IF NOT EXISTS car_model TEXT DEFAULT '';
+		ALTER TABLE users ADD COLUMN IF NOT EXISTS car_color TEXT DEFAULT '';
+		ALTER TABLE users ADD COLUMN IF NOT EXISTS car_plate TEXT DEFAULT '';
+		ALTER TABLE active_drivers ADD COLUMN IF NOT EXISTS seats_taken INT NOT NULL DEFAULT 0;
+	`)
 	return err
 }

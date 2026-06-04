@@ -39,7 +39,7 @@ func NotifyPassengerRideAvailable(fcmToken, driverID string, destLat, destLng fl
 		Token: fcmToken,
 		Notification: &messaging.Notification{
 			Title: "Ride available!",
-			Body:  "A driver heading your way â€” tap to respond",
+			Body:  "A driver heading your way — tap to respond",
 		},
 		Data: map[string]string{
 			"type":      "ride_request",

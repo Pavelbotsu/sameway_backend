@@ -47,6 +47,7 @@ func main() {
 	driver := r.Group("/driver", middleware.Auth(), middleware.RequireRole("driver"))
 	{
 		driver.POST("/route", handlers.SetRoute)
+		driver.POST("/respond", handlers.DriverRespondToRide)
 		driver.PUT("/location", handlers.UpdateLocation)
 		driver.GET("/requests", handlers.GetRequests)
 		driver.PUT("/status", handlers.UpdateStatus)
@@ -63,8 +64,10 @@ func main() {
 		passenger.POST("/respond", handlers.RespondToRide)
 		passenger.POST("/nearby-drivers", handlers.NearbyDrivers)
 		passenger.POST("/request-driver", handlers.RequestDriver)
+		passenger.GET("/my-requests", handlers.GetMyRequests)
 		passenger.DELETE("/active", handlers.GoOffline)
 		passenger.DELETE("/ride/:request_id", handlers.PassengerCancelRide)
+		passenger.DELETE("/request/:request_id", handlers.PassengerCancelPendingRequest)
 	}
 
 	chat := r.Group("/chat", middleware.Auth())
@@ -77,6 +80,8 @@ func main() {
 	r.GET("/promotions", handlers.GetPromotions)
 
 	r.GET("/ws", handlers.HandleWS)
+
+	go handlers.ReapPendingRideRequests(config.C.RideRequestTimeoutMinutes)
 
 	log.Printf("Listening on :%s", config.C.Port)
 	if err := r.Run(":" + config.C.Port); err != nil {
