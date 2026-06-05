@@ -8,6 +8,12 @@ import (
 	"github.com/Pavelbotsu/sameway_backend/models"
 )
 
+// destinationMatchMeters bounds how far a passenger's destination may be from
+// the driver's destination for the driver-initiated match to fire. NULL on
+// active_passengers.destination_lat means the passenger has not declared a
+// destination yet — they fall back to the legacy "any corridor match" behavior.
+const destinationMatchMeters = 1500
+
 func UpsertActiveDriver(driverID, routeWKT string, originLat, originLng, destLat, destLng, corridorKm float64, seats int) error {
 	_, err := db.DB.Exec(context.Background(), `
 		INSERT INTO active_drivers (driver_id, origin, destination, route, corridor_km, seats, status)
@@ -31,7 +37,7 @@ func UpsertActiveDriver(driverID, routeWKT string, originLat, originLng, destLat
 	return err
 }
 
-func FindPassengersInCorridor(routeWKT string, corridorKm float64, limit int) ([]models.User, error) {
+func FindPassengersInCorridor(routeWKT string, corridorKm float64, destLat, destLng float64, limit int) ([]models.User, error) {
 	rows, err := db.DB.Query(context.Background(), `
 		SELECT u.id, u.name, u.fcm_token,
 		       ST_Y(ap.location::geometry) AS lat,
@@ -49,9 +55,17 @@ func FindPassengersInCorridor(routeWKT string, corridorKm float64, limit int) ([
 			WHERE rr.passenger_id = u.id
 			  AND rr.status IN ('pending','accepted')
 		)
+		AND (
+			ap.destination_lat IS NULL
+			OR ST_DWithin(
+				ST_SetSRID(ST_MakePoint(ap.destination_lng, ap.destination_lat), 4326)::geography,
+				ST_SetSRID(ST_MakePoint($4, $3), 4326)::geography,
+				$5
+			)
+		)
 		ORDER BY ST_Distance(ap.location::geography, ST_GeogFromText($1)) ASC
-		LIMIT $3
-	`, routeWKT, corridorKm, limit)
+		LIMIT $6
+	`, routeWKT, corridorKm, destLat, destLng, destinationMatchMeters, limit)
 	if err != nil {
 		return nil, fmt.Errorf("corridor query: %w", err)
 	}
@@ -173,7 +187,9 @@ type NearbyDriver struct {
 
 // GetNearbyDrivers returns active drivers whose origin is within radiusKm of (lat, lng).
 // When destRadiusKm > 0, only drivers whose route passes within destRadiusKm of (destLat, destLng) are returned.
-func GetNearbyDrivers(lat, lng, radiusKm, destLat, destLng, destRadiusKm float64) ([]NearbyDriver, error) {
+// callerID excludes the caller themselves so a user who is both driver and passenger
+// (after a role switch with stale state) never sees their own car.
+func GetNearbyDrivers(lat, lng, radiusKm, destLat, destLng, destRadiusKm float64, callerID string) ([]NearbyDriver, error) {
 	rows, err := db.DB.Query(context.Background(), `
 		SELECT ad.driver_id,
 		       u.name,
@@ -197,7 +213,8 @@ func GetNearbyDrivers(lat, lng, radiusKm, destLat, destLng, destRadiusKm float64
 		))
 		AND ad.status = 'looking'
 		AND ad.created_at > NOW() - INTERVAL '30 minutes'
-	`, lat, lng, radiusKm, destLat, destLng, destRadiusKm)
+		AND ad.driver_id <> $7
+	`, lat, lng, radiusKm, destLat, destLng, destRadiusKm, callerID)
 	if err != nil {
 		return nil, err
 	}

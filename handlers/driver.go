@@ -43,7 +43,11 @@ func SetRoute(c *gin.Context) {
 		return
 	}
 
-	passengers, err := services.FindPassengersInCorridor(route.WKT, req.CorridorKm, config.C.MaxCorridorNotifications)
+	passengers, err := services.FindPassengersInCorridor(
+		route.WKT, req.CorridorKm,
+		req.DestinationLat, req.DestinationLng,
+		config.C.MaxCorridorNotifications,
+	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "geo query failed"})
 		return
@@ -191,6 +195,70 @@ func UpdateStatus(c *gin.Context) {
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// GetPickupRoute returns two OSRM road routes for an accepted ride:
+// driver→passenger (pickup leg) and passenger→destination (continuation leg).
+// On OSRM failure the failing leg returns wkt:"" and distance:0 instead of
+// erroring the whole response — partial routing info is still useful.
+func GetPickupRoute(c *gin.Context) {
+	requestID := c.Param("request_id")
+	driverID := c.GetString("user_id")
+	ctx := c.Request.Context()
+
+	var passengerID string
+	err := db.DB.QueryRow(ctx, `
+		SELECT passenger_id FROM ride_requests
+		WHERE id = $1 AND driver_id = $2 AND status = 'accepted'
+	`, requestID, driverID).Scan(&passengerID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "request not accepted or not yours"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+
+	var driverLat, driverLng, destLat, destLng float64
+	if err := db.DB.QueryRow(ctx, `
+		SELECT ST_Y(location::geometry), ST_X(location::geometry),
+		       destination_lat, destination_lng
+		FROM active_drivers WHERE driver_id = $1
+	`, driverID).Scan(&driverLat, &driverLng, &destLat, &destLng); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "driver not active"})
+		return
+	}
+
+	var passengerLat, passengerLng float64
+	if err := db.DB.QueryRow(ctx, `
+		SELECT ST_Y(location::geometry), ST_X(location::geometry)
+		FROM active_passengers WHERE passenger_id = $1
+	`, passengerID).Scan(&passengerLat, &passengerLng); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "passenger location unknown"})
+		return
+	}
+
+	pickupWkt := ""
+	pickupKm := 0.0
+	if r, err := services.GetRoadRoute(driverLat, driverLng, passengerLat, passengerLng); err == nil {
+		pickupWkt = r.WKT
+		pickupKm = r.DistanceKm
+	}
+
+	continuationWkt := ""
+	continuationKm := 0.0
+	if r, err := services.GetRoadRoute(passengerLat, passengerLng, destLat, destLng); err == nil {
+		continuationWkt = r.WKT
+		continuationKm = r.DistanceKm
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"pickup_wkt":               pickupWkt,
+		"pickup_distance_km":       pickupKm,
+		"continuation_wkt":         continuationWkt,
+		"continuation_distance_km": continuationKm,
+	})
 }
 
 func DriverCancelRide(c *gin.Context) {

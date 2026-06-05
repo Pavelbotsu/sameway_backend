@@ -1,4 +1,4 @@
-// Simulation: 10 drivers + 50 passengers.
+// Simulation: drivers + passengers exercising both connection flows.
 // Run from sameway_backend/: go run ./cmd/simulate/
 // Backend must be running on localhost:8080.
 package main
@@ -27,6 +27,14 @@ const (
 	latCenter = 50.08811 // Krakow center
 	lngCenter = 20.02456
 	spread    = 0.02 // ~5 km
+)
+
+const (
+	numDrivers    = 100
+	numPassengers = 50
+	// Fraction of passengers that, after seeing drivers via /nearby-drivers,
+	// will pick one and POST /passenger/request-driver (passenger-initiated flow).
+	requestDriverFraction = 0.5
 )
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -60,6 +68,29 @@ func post(path, token string, body any) (map[string]any, error) {
 		return m, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(raw))
 	}
 	return m, nil
+}
+
+// postList is the same as post but decodes a JSON list response (e.g.
+// /passenger/nearby-drivers returns an array, not an object).
+func postList(path, token string, body any) ([]map[string]any, error) {
+	b, _ := json.Marshal(body)
+	req, _ := http.NewRequest(http.MethodPost, base+path, bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(raw))
+	}
+	var list []map[string]any
+	json.Unmarshal(raw, &list)
+	return list, nil
 }
 
 func put(path, token string, body any) error {
@@ -152,11 +183,15 @@ func registerAll(prefix, role string, n int) []user {
 }
 
 // ── passenger WebSocket listener ─────────────────────────────────────────────
+//
+// Auto-accepts every `ride_request` (driver-initiated flow) and tracks
+// `driver_response` (passenger-initiated flow — confirms the driver accepted).
 
 var (
-	wsOffersReceived int64
-	wsAccepted       int64
-	wsErrors         int64
+	wsOffersReceived    int64 // ride_request events (driver-initiated)
+	wsAccepted          int64 // passenger /respond accept calls
+	driverResponseEvts  int64 // driver_response received (passenger-initiated)
+	wsErrors            int64
 )
 
 func listenPassenger(u user, wg *sync.WaitGroup) {
@@ -183,9 +218,9 @@ func listenPassenger(u user, wg *sync.WaitGroup) {
 		if json.Unmarshal(msg, &ev) != nil {
 			continue
 		}
-		if ev["type"] == "ride_request" {
+		switch ev["type"] {
+		case "ride_request":
 			atomic.AddInt64(&wsOffersReceived, 1)
-			// Auto-accept the ride.
 			payload, _ := ev["payload"].(map[string]any)
 			reqID, _ := payload["request_id"].(string)
 			if reqID != "" {
@@ -197,13 +232,22 @@ func listenPassenger(u user, wg *sync.WaitGroup) {
 					atomic.AddInt64(&wsAccepted, 1)
 				}
 			}
+		case "driver_response":
+			atomic.AddInt64(&driverResponseEvts, 1)
 		}
 	}
 }
 
 // ── driver WebSocket listener ─────────────────────────────────────────────────
+//
+// Auto-accepts every `passenger_request` (passenger-initiated flow) and tracks
+// `ride_response` (driver-initiated flow — confirms the passenger accepted).
 
-var driverResponses int64
+var (
+	driverResponses        int64 // ride_response received (driver-initiated)
+	passengerRequestEvts   int64 // passenger_request received (passenger-initiated)
+	driverPassengerAccepts int64 // driver /respond accept calls
+)
 
 func listenDriver(u user, wg *sync.WaitGroup) {
 	defer wg.Done()
@@ -213,6 +257,7 @@ func listenDriver(u user, wg *sync.WaitGroup) {
 	url := wsBase + "/ws?token=" + u.Token
 	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
+		atomic.AddInt64(&wsErrors, 1)
 		return
 	}
 	defer conn.Close()
@@ -227,8 +272,22 @@ func listenDriver(u user, wg *sync.WaitGroup) {
 		if json.Unmarshal(msg, &ev) != nil {
 			continue
 		}
-		if ev["type"] == "ride_response" {
+		switch ev["type"] {
+		case "ride_response":
 			atomic.AddInt64(&driverResponses, 1)
+		case "passenger_request":
+			atomic.AddInt64(&passengerRequestEvts, 1)
+			payload, _ := ev["payload"].(map[string]any)
+			reqID, _ := payload["request_id"].(string)
+			if reqID != "" {
+				_, err := post("/driver/respond", u.Token, map[string]any{
+					"request_id": reqID,
+					"status":     "accepted",
+				})
+				if err == nil {
+					atomic.AddInt64(&driverPassengerAccepts, 1)
+				}
+			}
 		}
 	}
 }
@@ -238,19 +297,21 @@ func listenDriver(u user, wg *sync.WaitGroup) {
 func main() {
 	start := time.Now()
 	fmt.Println("═══════════════════════════════════════")
-	fmt.Println("  sameway simulation: 100 drivers / 50 passengers")
+	fmt.Printf("  sameway simulation: %d drivers / %d passengers\n",
+		numDrivers, numPassengers)
 	fmt.Println("═══════════════════════════════════════")
 
 	// 1. Register all users.
-	fmt.Println("\n[1/5] Registering users...")
-	drivers := registerAll("sim_driver", "driver", 100)
-	passengers := registerAll("sim_pass", "passenger", 50)
+	fmt.Println("\n[1/7] Registering users...")
+	drivers := registerAll("sim_driver", "driver", numDrivers)
+	passengers := registerAll("sim_pass", "passenger", numPassengers)
 	dOK := countOK(drivers)
 	pOK := countOK(passengers)
-	fmt.Printf("  ✓ %d/100 drivers  |  %d/50 passengers registered\n", dOK, pOK)
+	fmt.Printf("  ✓ %d/%d drivers  |  %d/%d passengers registered\n",
+		dOK, numDrivers, pOK, numPassengers)
 
 	// 2. Connect all WebSocket listeners.
-	fmt.Println("\n[2/5] Connecting WebSockets...")
+	fmt.Println("\n[2/7] Connecting WebSockets...")
 	var wsWg sync.WaitGroup
 	for _, p := range passengers {
 		if p.Token == "" {
@@ -269,8 +330,8 @@ func main() {
 	time.Sleep(500 * time.Millisecond) // let connections settle
 	fmt.Printf("  ✓ WS connections opened\n")
 
-	// 3. Update all passenger locations.
-	fmt.Println("\n[3/5] Sending passenger locations...")
+	// 3. Update all passenger locations (required for both flows).
+	fmt.Println("\n[3/7] Sending passenger locations...")
 	var locWg sync.WaitGroup
 	var locOK int64
 	for _, p := range passengers {
@@ -281,8 +342,8 @@ func main() {
 		go func(p user) {
 			defer locWg.Done()
 			err := put("/passenger/location", p.Token, map[string]any{
-				"latitude":  randLat(),
-				"longitude": randLng(),
+				"lat": randLat(),
+				"lng": randLng(),
 			})
 			if err == nil {
 				atomic.AddInt64(&locOK, 1)
@@ -292,8 +353,10 @@ func main() {
 	locWg.Wait()
 	fmt.Printf("  ✓ %d/%d location updates sent\n", locOK, pOK)
 
-	// 4. Set driver routes (corridor covers the same area as passengers).
-	fmt.Println("\n[4/5] Setting driver routes...")
+	// 4. Set driver routes — triggers driver-initiated flow:
+	//    backend matches passengers in the corridor and emits `ride_request` WS
+	//    events; listenPassenger auto-accepts each.
+	fmt.Println("\n[4/7] Setting driver routes (driver-initiated flow)...")
 	var routeWg sync.WaitGroup
 	var totalNotified int64
 	var routeOK int64
@@ -322,14 +385,61 @@ func main() {
 		}(d)
 	}
 	routeWg.Wait()
-	fmt.Printf("  ✓ %d/10 routes set  |  %d total passenger notifications sent\n",
-		routeOK, totalNotified)
+	fmt.Printf("  ✓ %d/%d routes set  |  %d total passenger notifications sent\n",
+		routeOK, numDrivers, totalNotified)
 
-	// 5. Wait for WS events to propagate.
-	fmt.Println("\n[5/5] Waiting for WebSocket events (10s)...")
-	time.Sleep(10 * time.Second)
+	// 5. Let driver-initiated rides settle so seats reserved by the
+	//    `ride_request` auto-accepts don't collide with the
+	//    passenger-initiated burst in step 6.
+	fmt.Println("\n[5/7] Waiting 4s for driver-initiated WS to settle...")
+	time.Sleep(4 * time.Second)
 
-	// 6. Check driver request counts.
+	// 6. Passenger-initiated flow: half of passengers call /nearby-drivers,
+	//    pick one at random, and POST /passenger/request-driver. The matched
+	//    driver's WS listener auto-accepts via /driver/respond.
+	fmt.Println("\n[6/7] Passenger-initiated requests...")
+	var reqWg sync.WaitGroup
+	var nearbyOK, requestSent int64
+	wantRequesters := int(float64(pOK) * requestDriverFraction)
+	requesters := pickN(passengers, wantRequesters)
+	for _, p := range requesters {
+		if p.Token == "" {
+			continue
+		}
+		reqWg.Add(1)
+		go func(p user) {
+			defer reqWg.Done()
+			nearby, err := postList("/passenger/nearby-drivers", p.Token,
+				map[string]any{
+					"latitude":  randLat(),
+					"longitude": randLng(),
+					"radius_km": 10.0,
+				})
+			if err != nil || len(nearby) == 0 {
+				return
+			}
+			atomic.AddInt64(&nearbyOK, 1)
+			driverID, _ := nearby[rand.Intn(len(nearby))]["driver_id"].(string)
+			if driverID == "" {
+				return
+			}
+			_, err = post("/passenger/request-driver", p.Token, map[string]any{
+				"driver_id": driverID,
+			})
+			if err == nil {
+				atomic.AddInt64(&requestSent, 1)
+			}
+		}(p)
+	}
+	reqWg.Wait()
+	fmt.Printf("  ✓ %d/%d nearby-drivers calls  |  %d /request-driver POSTs\n",
+		nearbyOK, len(requesters), requestSent)
+
+	// 7. Wait for the passenger-initiated WS round-trip to complete.
+	fmt.Println("\n[7/7] Waiting 6s for passenger-initiated WS to settle...")
+	time.Sleep(6 * time.Second)
+
+	// 8. Snapshot the per-driver request queue.
 	var totalRequests int
 	for _, d := range drivers {
 		if d.Token == "" {
@@ -346,26 +456,45 @@ func main() {
 	fmt.Println("\n═══════════════════════════════════════")
 	fmt.Println("  RESULTS")
 	fmt.Println("═══════════════════════════════════════")
-	fmt.Printf("  Users registered       %d drivers / %d passengers\n", dOK, pOK)
-	fmt.Printf("  Location updates sent  %d / %d\n", locOK, pOK)
-	fmt.Printf("  Driver routes set      %d / 10\n", routeOK)
-	fmt.Printf("  Passengers notified    %d (via backend)\n", totalNotified)
-	fmt.Printf("  WS ride_request events %d received by passengers\n", wsOffersReceived)
-	fmt.Printf("  Passengers accepted    %d rides via WS\n", wsAccepted)
-	fmt.Printf("  Driver ride_responses  %d received\n", driverResponses)
-	fmt.Printf("  Pending requests in DB %d\n", totalRequests)
-	fmt.Printf("  WS errors              %d\n", wsErrors)
-	fmt.Printf("  Total time             %s\n", elapsed)
+	fmt.Printf("  Users registered           %d drivers / %d passengers\n",
+		dOK, pOK)
+	fmt.Printf("  Location updates sent      %d / %d\n", locOK, pOK)
+	fmt.Printf("  Driver routes set          %d / %d\n", routeOK, numDrivers)
+	fmt.Println("  -- Driver-initiated flow --")
+	fmt.Printf("  Passengers notified        %d (via backend match)\n",
+		totalNotified)
+	fmt.Printf("  WS ride_request events     %d received by passengers\n",
+		wsOffersReceived)
+	fmt.Printf("  Passengers accepted        %d rides via WS auto-accept\n",
+		wsAccepted)
+	fmt.Printf("  Driver ride_response evts  %d received\n", driverResponses)
+	fmt.Println("  -- Passenger-initiated flow --")
+	fmt.Printf("  /nearby-drivers OK         %d / %d\n",
+		nearbyOK, len(requesters))
+	fmt.Printf("  /request-driver POSTs      %d sent\n", requestSent)
+	fmt.Printf("  WS passenger_request evts  %d received by drivers\n",
+		passengerRequestEvts)
+	fmt.Printf("  Drivers accepted           %d rides via WS auto-accept\n",
+		driverPassengerAccepts)
+	fmt.Printf("  Passenger driver_response  %d received\n", driverResponseEvts)
+	fmt.Println("  --")
+	fmt.Printf("  Pending requests in DB     %d\n", totalRequests)
+	fmt.Printf("  WS errors                  %d\n", wsErrors)
+	fmt.Printf("  Total time                 %s\n", elapsed)
 	fmt.Println("═══════════════════════════════════════")
 
 	if wsErrors > 0 {
 		fmt.Println("\n  ⚠  WS errors usually mean the backend WS endpoint is not running.")
 	}
 	if totalNotified == 0 {
-		fmt.Println("\n  ⚠  0 passengers notified. Likely causes:")
+		fmt.Println("\n  ⚠  0 passengers notified by driver-initiated flow. Likely causes:")
 		fmt.Println("     • OSRM not running (route calculation failed)")
 		fmt.Println("     • Passengers not in PostGIS yet when routes were set")
-		fmt.Println("     • DB connection issue")
+		fmt.Println("     • Corridor query filter excluded passengers with live requests")
+	}
+	if requestSent > 0 && passengerRequestEvts == 0 {
+		fmt.Println("\n  ⚠  /request-driver posted but no passenger_request WS reached drivers.")
+		fmt.Println("     • Check Hub.SendToUser / WS handler in handlers/passenger.go")
 	}
 }
 
@@ -377,4 +506,19 @@ func countOK(users []user) int {
 		}
 	}
 	return n
+}
+
+// pickN returns up to n distinct users with a non-empty token, in input order.
+func pickN(users []user, n int) []user {
+	out := make([]user, 0, n)
+	for _, u := range users {
+		if u.Token == "" {
+			continue
+		}
+		out = append(out, u)
+		if len(out) >= n {
+			break
+		}
+	}
+	return out
 }

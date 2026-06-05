@@ -57,6 +57,8 @@ func Migrate() error {
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			passenger_id UUID UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 			location GEOGRAPHY(POINT,4326) NOT NULL,
+			destination_lat DOUBLE PRECISION,
+			destination_lng DOUBLE PRECISION,
 			updated_at TIMESTAMPTZ DEFAULT NOW()
 		);
 
@@ -140,6 +142,8 @@ func Migrate() error {
 		ALTER TABLE users ADD COLUMN IF NOT EXISTS car_color TEXT DEFAULT '';
 		ALTER TABLE users ADD COLUMN IF NOT EXISTS car_plate TEXT DEFAULT '';
 		ALTER TABLE active_drivers ADD COLUMN IF NOT EXISTS seats_taken INT NOT NULL DEFAULT 0;
+		ALTER TABLE active_passengers ADD COLUMN IF NOT EXISTS destination_lat DOUBLE PRECISION;
+		ALTER TABLE active_passengers ADD COLUMN IF NOT EXISTS destination_lng DOUBLE PRECISION;
 	`)
 	return err
 }

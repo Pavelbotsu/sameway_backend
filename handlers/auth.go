@@ -187,6 +187,61 @@ func SwitchRole(c *gin.Context) {
 		return
 	}
 	userID := c.GetString("user_id")
+	oldRole := c.GetString("role")
+
+	// Clean up any live state from the role the user is leaving so the new
+	// role lands on a clean slate. Notify matched counterparties over WS so
+	// their UI doesn't keep stale tiles. DB cleanup proceeds even if WS sends
+	// fail (offline counterparty).
+	ctx := c.Request.Context()
+	switch oldRole {
+	case "driver":
+		rows, err := db.DB.Query(ctx, `
+			SELECT id, passenger_id FROM ride_requests
+			WHERE driver_id = $1 AND status IN ('pending','accepted')
+		`, userID)
+		if err == nil {
+			for rows.Next() {
+				var reqID, passengerID string
+				if rows.Scan(&reqID, &passengerID) == nil {
+					Hub.SendToUser(passengerID, "ride_cancelled", gin.H{
+						"request_id":   reqID,
+						"cancelled_by": "driver_role_switch",
+					})
+				}
+			}
+			rows.Close()
+		}
+		db.DB.Exec(ctx, `
+			UPDATE ride_requests SET status = 'cancelled'
+			WHERE driver_id = $1 AND status IN ('pending','accepted')
+		`, userID)
+		db.DB.Exec(ctx, `DELETE FROM active_drivers WHERE driver_id = $1`, userID)
+
+	case "passenger":
+		rows, err := db.DB.Query(ctx, `
+			SELECT id, driver_id FROM ride_requests
+			WHERE passenger_id = $1 AND status IN ('pending','accepted')
+		`, userID)
+		if err == nil {
+			for rows.Next() {
+				var reqID, driverID string
+				if rows.Scan(&reqID, &driverID) == nil {
+					Hub.SendToUser(driverID, "passenger_request_cancelled", gin.H{
+						"request_id":   reqID,
+						"cancelled_by": "passenger_role_switch",
+					})
+				}
+			}
+			rows.Close()
+		}
+		db.DB.Exec(ctx, `
+			UPDATE ride_requests SET status = 'cancelled'
+			WHERE passenger_id = $1 AND status IN ('pending','accepted')
+		`, userID)
+		db.DB.Exec(ctx, `DELETE FROM active_passengers WHERE passenger_id = $1`, userID)
+	}
+
 	token, err := middleware.GenerateToken(userID, req.Role)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})

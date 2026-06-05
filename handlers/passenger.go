@@ -304,7 +304,8 @@ func NearbyDrivers(c *gin.Context) {
 	if req.RadiusKm <= 0 {
 		req.RadiusKm = 10
 	}
-	drivers, err := services.GetNearbyDrivers(req.Lat, req.Lng, req.RadiusKm, req.DestLat, req.DestLng, req.DestRadiusKm)
+	callerID := c.GetString("user_id")
+	drivers, err := services.GetNearbyDrivers(req.Lat, req.Lng, req.RadiusKm, req.DestLat, req.DestLng, req.DestRadiusKm, callerID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
@@ -324,6 +325,10 @@ func RequestDriver(c *gin.Context) {
 		return
 	}
 	passengerID := c.GetString("user_id")
+	if req.DriverID == passengerID {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot request yourself"})
+		return
+	}
 
 	var pickupLat, pickupLng float64
 	err := db.DB.QueryRow(context.Background(), `
@@ -423,6 +428,53 @@ func PassengerCancelRide(c *gin.Context) {
 // PassengerCancelRide which only acts on accepted rows and adjusts driver
 // capacity. Emits passenger_request_cancelled to the driver so their pending
 // tile disappears.
+// PassengerSearch persists the passenger's destination on active_passengers and
+// returns an OSRM route from current location to destination so the client can
+// draw the planned trip on the map. The destination also tightens
+// FindPassengersInCorridor so only drivers actually heading that way notify.
+func PassengerSearch(c *gin.Context) {
+	var req struct {
+		DestLat float64 `json:"dest_lat" binding:"required"`
+		DestLng float64 `json:"dest_lng" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	passengerID := c.GetString("user_id")
+	ctx := c.Request.Context()
+
+	var originLat, originLng float64
+	if err := db.DB.QueryRow(ctx, `
+		SELECT ST_Y(location::geometry), ST_X(location::geometry)
+		FROM active_passengers WHERE passenger_id = $1
+	`, passengerID).Scan(&originLat, &originLng); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "update your location first"})
+		return
+	}
+
+	if _, err := db.DB.Exec(ctx, `
+		UPDATE active_passengers
+		SET destination_lat = $1, destination_lng = $2, updated_at = NOW()
+		WHERE passenger_id = $3
+	`, req.DestLat, req.DestLng, passengerID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+
+	routeWkt := ""
+	distanceKm := 0.0
+	if r, err := services.GetRoadRoute(originLat, originLng, req.DestLat, req.DestLng); err == nil {
+		routeWkt = r.WKT
+		distanceKm = r.DistanceKm
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"route_wkt":   routeWkt,
+		"distance_km": distanceKm,
+	})
+}
+
 func PassengerCancelPendingRequest(c *gin.Context) {
 	requestID := c.Param("request_id")
 	passengerID := c.GetString("user_id")
