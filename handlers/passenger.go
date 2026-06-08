@@ -203,6 +203,12 @@ func respondAccept(c *gin.Context, passengerID, requestID string) {
 
 	passengerName, avg, count := loadPassengerProfile(passengerID)
 
+	// Pickup-confirmation code: assigned exactly once per row at first accept.
+	// Both sides see it via the WS payloads below + the row's persisted value
+	// (so a reconnect via /driver/requests or /passenger/my-requests rehydrates
+	// the code without a round-trip).
+	pickupCode, _ := services.SetPickupCode(ctx, requestID)
+
 	services.NotifyDriverPassengerResponded(driverFCM, passengerID, "accepted")
 	Hub.SendToUser(driverID, "ride_response", gin.H{
 		"passenger_id":           passengerID,
@@ -211,6 +217,7 @@ func respondAccept(c *gin.Context, passengerID, requestID string) {
 		"passenger_rating_count": count,
 		"request_id":             requestID,
 		"status":                 "accepted",
+		"pickup_code":            pickupCode,
 	})
 
 	for _, b := range bumped {
@@ -244,14 +251,16 @@ func GetMyRequests(c *gin.Context) {
 		       u.name,
 		       COALESCE(AVG(r.stars), 0), COUNT(r.id),
 		       COALESCE(u.car_make,''), COALESCE(u.car_model,''),
-		       COALESCE(u.car_color,''), COALESCE(u.car_plate,'')
+		       COALESCE(u.car_color,''), COALESCE(u.car_plate,''),
+		       COALESCE(rr.pickup_code, ''), rr.picked_up_at
 		FROM ride_requests rr
 		JOIN users u ON u.id = rr.driver_id
 		LEFT JOIN ratings r ON r.rated_id = rr.driver_id
 		WHERE rr.passenger_id = $1
-		  AND rr.status IN ('pending','accepted')
+		  AND rr.status IN ('pending','accepted','in_progress')
 		GROUP BY rr.id, rr.driver_id, rr.status, rr.created_at,
-		         u.name, u.car_make, u.car_model, u.car_color, u.car_plate
+		         u.name, u.car_make, u.car_model, u.car_color, u.car_plate,
+		         rr.pickup_code, rr.picked_up_at
 		ORDER BY rr.created_at DESC
 	`, passengerID)
 	if err != nil {
@@ -263,15 +272,17 @@ func GetMyRequests(c *gin.Context) {
 	out := make([]gin.H, 0)
 	for rows.Next() {
 		var id, driverID, status, name string
-		var carMake, carModel, carColor, carPlate string
+		var carMake, carModel, carColor, carPlate, pickupCode string
 		var createdAt time.Time
+		var pickedUpAt *time.Time
 		var avg float64
 		var count int
 		if err := rows.Scan(&id, &driverID, &status, &createdAt, &name,
-			&avg, &count, &carMake, &carModel, &carColor, &carPlate); err != nil {
+			&avg, &count, &carMake, &carModel, &carColor, &carPlate,
+			&pickupCode, &pickedUpAt); err != nil {
 			continue
 		}
-		out = append(out, gin.H{
+		entry := gin.H{
 			"request_id":          id,
 			"driver_id":           driverID,
 			"status":              status,
@@ -283,7 +294,12 @@ func GetMyRequests(c *gin.Context) {
 			"car_model":           carModel,
 			"car_color":           carColor,
 			"car_plate":           carPlate,
-		})
+			"pickup_code":         pickupCode,
+		}
+		if pickedUpAt != nil {
+			entry["picked_up_at"] = pickedUpAt.Format(time.RFC3339)
+		}
+		out = append(out, entry)
 	}
 	c.JSON(http.StatusOK, out)
 }
@@ -340,38 +356,46 @@ func RequestDriver(c *gin.Context) {
 		return
 	}
 
-	requestID, err := services.CreateRideRequest(req.DriverID, passengerID, pickupLat, pickupLng)
+	requestID, isNew, err := services.CreateRideRequest(req.DriverID, passengerID, pickupLat, pickupLng)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
 
-	var passengerName string
-	var passengerAvgRating float64
-	var passengerRatingCount int
-	db.DB.QueryRow(context.Background(), `
-		SELECT u.name, COALESCE(AVG(r.stars), 0), COUNT(r.id)
-		FROM users u
-		LEFT JOIN ratings r ON r.rated_id = u.id
-		WHERE u.id = $1
-		GROUP BY u.id, u.name
-	`, passengerID).Scan(&passengerName, &passengerAvgRating, &passengerRatingCount)
+	// Only notify the driver if this is a genuinely new request. If an active
+	// row already exists (the driver already saw this passenger via a corridor
+	// match), the passenger is just confirming on their side — the driver's
+	// UI is already up-to-date and a second event would confuse it.
+	if isNew {
+		var passengerName string
+		var passengerAvgRating float64
+		var passengerRatingCount int
+		db.DB.QueryRow(context.Background(), `
+			SELECT u.name, COALESCE(AVG(r.stars), 0), COUNT(r.id)
+			FROM users u
+			LEFT JOIN ratings r ON r.rated_id = u.id
+			WHERE u.id = $1
+			GROUP BY u.id, u.name
+		`, passengerID).Scan(&passengerName, &passengerAvgRating, &passengerRatingCount)
 
-	Hub.SendToUser(req.DriverID, "passenger_request", gin.H{
-		"request_id":             requestID,
-		"passenger_id":           passengerID,
-		"passenger_name":         passengerName,
-		"passenger_avg_rating":   passengerAvgRating,
-		"passenger_rating_count": passengerRatingCount,
-		"pickup_lat":             pickupLat,
-		"pickup_lng":             pickupLng,
-	})
+		Hub.SendToUser(req.DriverID, "passenger_request", gin.H{
+			"request_id":             requestID,
+			"passenger_id":           passengerID,
+			"passenger_name":         passengerName,
+			"passenger_avg_rating":   passengerAvgRating,
+			"passenger_rating_count": passengerRatingCount,
+			"pickup_lat":             pickupLat,
+			"pickup_lng":             pickupLng,
+		})
+	}
 
-	var driverFCM string
-	db.DB.QueryRow(context.Background(),
-		`SELECT COALESCE(fcm_token,'') FROM users WHERE id = $1`, req.DriverID,
-	).Scan(&driverFCM)
-	services.NotifyDriverPassengerRequested(driverFCM, passengerID)
+	if isNew {
+		var driverFCM string
+		db.DB.QueryRow(context.Background(),
+			`SELECT COALESCE(fcm_token,'') FROM users WHERE id = $1`, req.DriverID,
+		).Scan(&driverFCM)
+		services.NotifyDriverPassengerRequested(driverFCM, passengerID)
+	}
 
 	c.JSON(http.StatusOK, gin.H{"ok": true, "request_id": requestID})
 }

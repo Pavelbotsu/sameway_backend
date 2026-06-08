@@ -58,13 +58,18 @@ type ActivePassenger struct {
 }
 
 type RideRequest struct {
-	ID          string    `json:"id"`
-	DriverID    string    `json:"driver_id"`
-	PassengerID string    `json:"passenger_id"`
-	PickupLat   float64   `json:"pickup_lat"`
-	PickupLng   float64   `json:"pickup_lng"`
-	Status      string    `json:"status"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID                   string     `json:"id"`
+	DriverID             string     `json:"driver_id"`
+	PassengerID          string     `json:"passenger_id"`
+	PickupLat            float64    `json:"pickup_lat"`
+	PickupLng            float64    `json:"pickup_lng"`
+	Status               string     `json:"status"`
+	CreatedAt            time.Time  `json:"created_at"`
+	PassengerName        string     `json:"passenger_name,omitempty"`
+	PassengerAvgRating   float64    `json:"passenger_avg_rating,omitempty"`
+	PassengerRatingCount int        `json:"passenger_rating_count,omitempty"`
+	PickupCode           string     `json:"pickup_code,omitempty"`
+	PickedUpAt           *time.Time `json:"picked_up_at,omitempty"`
 }
 
 type WSMessage struct {

@@ -15,13 +15,41 @@ type RouteResult struct {
 	DistanceKm float64
 }
 
-func GetRoadRoute(originLat, originLng, destLat, destLng float64) (*RouteResult, error) {
+// RoutingClient abstracts road-route lookups so tests can swap a mock without
+// hitting OSRM. The production wiring (DefaultRoutingClient) is set at startup
+// to an OSRMClient that reads config.C.OSRMBaseURL on each call.
+type RoutingClient interface {
+	GetRoadRoute(originLat, originLng, destLat, destLng float64) (*RouteResult, error)
+}
+
+// OSRMClient is the production implementation. BaseURL falls back to
+// config.C.OSRMBaseURL when empty so existing code paths keep working.
+type OSRMClient struct {
+	BaseURL string
+	HTTP    *http.Client
+}
+
+func (c *OSRMClient) baseURL() string {
+	if c.BaseURL != "" {
+		return c.BaseURL
+	}
+	return config.C.OSRMBaseURL
+}
+
+func (c *OSRMClient) http() *http.Client {
+	if c.HTTP != nil {
+		return c.HTTP
+	}
+	return http.DefaultClient
+}
+
+func (c *OSRMClient) GetRoadRoute(originLat, originLng, destLat, destLng float64) (*RouteResult, error) {
 	url := fmt.Sprintf(
 		"%s/route/v1/driving/%f,%f;%f,%f?overview=full&geometries=geojson",
-		config.C.OSRMBaseURL, originLng, originLat, destLng, destLat,
+		c.baseURL(), originLng, originLat, destLng, destLat,
 	)
 
-	resp, err := http.Get(url)
+	resp, err := c.http().Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("osrm request: %w", err)
 	}
@@ -55,4 +83,14 @@ func GetRoadRoute(originLat, originLng, destLat, destLng float64) (*RouteResult,
 		Coords:     coords,
 		DistanceKm: route.Distance / 1000,
 	}, nil
+}
+
+// DefaultRoutingClient is the package-level routing client every caller goes
+// through. Tests assign a mock implementation here in TestMain or per-test.
+var DefaultRoutingClient RoutingClient = &OSRMClient{}
+
+// GetRoadRoute is a thin wrapper that delegates to DefaultRoutingClient so
+// existing handler code can keep calling it unchanged.
+func GetRoadRoute(originLat, originLng, destLat, destLng float64) (*RouteResult, error) {
+	return DefaultRoutingClient.GetRoadRoute(originLat, originLng, destLat, destLng)
 }

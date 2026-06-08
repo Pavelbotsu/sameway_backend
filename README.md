@@ -301,4 +301,44 @@ GIST indexes on `active_drivers.route`, `active_passengers.location`, and the `p
 
 ## Build status
 
-`go build ./...` clean. `go vet ./...` clean.
+`go build ./...` clean. `go vet ./...` clean. `go test ./...` clean.
+
+## Running tests
+
+The test suite uses [testcontainers-go](https://golang.testcontainers.org/) to
+spin up a real Postgres+PostGIS container per test package. **Docker must be
+running locally** (or in CI). No mocks for SQL — the bugs we ship are
+SQL-level, so the tests run against actual PostGIS.
+
+```bash
+# Full suite (~30-60 s after first image pull; ~150 MB postgis image).
+go test ./...
+
+# Single package with verbose output:
+go test ./services/ -v
+
+# A specific regression test, e.g. the recent ON CONFLICT fix:
+go test ./services/ -run TestCreateRideRequest_IdempotentOnExistingPending -v
+
+# Coverage:
+go test -coverprofile=cover.out ./...
+go tool cover -func=cover.out | tail -1
+
+# Race detector (slower, catches data races in the WS Hub):
+go test -race ./...
+```
+
+### Test layout
+
+- `services/*_test.go` — pure logic + SQL: `CreateRideRequest` idempotency,
+  `FindPassengersInCorridor` heading filter, `GetNearbyDrivers` self-exclusion,
+  OSRM client.
+- `handlers/*_test.go` — every route in `main.go` with happy + failure cases.
+- `middleware/auth_test.go` — JWT issuance and role enforcement.
+- `db/postgres_test.go` — migration idempotency + schema invariants.
+- `tests/e2e/flow_test.go` — cross-handler choreography: driver-initiated
+  match, passenger-initiated match, role switch, self-pair guards, ride
+  completion.
+
+The Postgres+PostGIS image (`postgis/postgis:15-3.4-alpine`) is pulled once
+and cached; subsequent runs are instant.

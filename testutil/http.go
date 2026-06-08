@@ -1,0 +1,126 @@
+package testutil
+
+import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/Pavelbotsu/sameway_backend/handlers"
+	"github.com/Pavelbotsu/sameway_backend/middleware"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/require"
+)
+
+// NewTestRouter returns a Gin engine wired with the exact same route table as
+// main.go. Uses gin.TestMode (no log spam). Hub is the package-level singleton
+// in handlers — tests don't need to instantiate it.
+func NewTestRouter() *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+
+	auth := r.Group("/auth")
+	{
+		auth.POST("/register", handlers.Register)
+		auth.POST("/login", handlers.Login)
+		auth.GET("/profile", middleware.Auth(), handlers.GetProfile)
+		auth.PUT("/profile", middleware.Auth(), handlers.UpdateProfile)
+		auth.POST("/switch-role", middleware.Auth(), handlers.SwitchRole)
+		auth.PUT("/fcm-token", middleware.Auth(), handlers.UpdateFCMToken)
+		auth.GET("/fcm-status", middleware.Auth(), handlers.FCMStatus)
+		auth.POST("/test-notification", middleware.Auth(), handlers.TestNotification)
+		auth.GET("/stats", middleware.Auth(), handlers.GetStats)
+		auth.POST("/change-password", middleware.Auth(), handlers.ChangePassword)
+		auth.GET("/trips", middleware.Auth(), handlers.GetTripHistory)
+	}
+
+	r.POST("/ratings", middleware.Auth(), handlers.SubmitRating)
+	r.POST("/pickup/confirm", middleware.Auth(), handlers.ConfirmPickup)
+
+	driver := r.Group("/driver", middleware.Auth(), middleware.RequireRole("driver"))
+	{
+		driver.POST("/route", handlers.SetRoute)
+		driver.POST("/respond", handlers.DriverRespondToRide)
+		driver.PUT("/location", handlers.UpdateLocation)
+		driver.GET("/requests", handlers.GetRequests)
+		driver.GET("/pickup-route/:request_id", handlers.GetPickupRoute)
+		driver.PUT("/status", handlers.UpdateStatus)
+		driver.POST("/dropoff/:request_id", handlers.DropoffPassenger)
+		driver.DELETE("/route", handlers.DeleteRoute)
+		driver.DELETE("/ride/:request_id", handlers.DriverCancelRide)
+		driver.POST("/trips", handlers.PlanTrip)
+		driver.GET("/trips", handlers.GetMyPlannedTrips)
+		driver.DELETE("/trips/:id", handlers.CancelPlannedTrip)
+	}
+
+	passenger := r.Group("/passenger", middleware.Auth(), middleware.RequireRole("passenger"))
+	{
+		passenger.PUT("/location", handlers.PassengerUpdateLocation)
+		passenger.POST("/respond", handlers.RespondToRide)
+		passenger.POST("/nearby-drivers", handlers.NearbyDrivers)
+		passenger.POST("/search", handlers.PassengerSearch)
+		passenger.POST("/request-driver", handlers.RequestDriver)
+		passenger.GET("/my-requests", handlers.GetMyRequests)
+		passenger.DELETE("/active", handlers.GoOffline)
+		passenger.DELETE("/ride/:request_id", handlers.PassengerCancelRide)
+		passenger.DELETE("/request/:request_id", handlers.PassengerCancelPendingRequest)
+	}
+
+	chat := r.Group("/chat", middleware.Auth())
+	{
+		chat.POST("/send", handlers.SendMessage)
+		chat.GET("/:request_id", handlers.GetMessages)
+	}
+
+	r.POST("/trips/search", handlers.SearchTrips)
+	r.GET("/promotions", handlers.GetPromotions)
+	r.GET("/ws", handlers.HandleWS)
+	return r
+}
+
+// Do hits the engine with a single HTTP request, encoded as JSON if body is
+// non-nil. Authorization header is set when token is non-empty.
+func Do(t testing.TB, r *gin.Engine, method, path, token string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	var reader io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		require.NoError(t, err)
+		reader = bytes.NewReader(b)
+	}
+	req := httptest.NewRequest(method, path, reader)
+	if reader != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
+}
+
+// PostJSON is a thin convenience for the most common case.
+func PostJSON(t testing.TB, r *gin.Engine, path, token string, body any) *httptest.ResponseRecorder {
+	return Do(t, r, http.MethodPost, path, token, body)
+}
+
+func PutJSON(t testing.TB, r *gin.Engine, path, token string, body any) *httptest.ResponseRecorder {
+	return Do(t, r, http.MethodPut, path, token, body)
+}
+
+func GetJSON(t testing.TB, r *gin.Engine, path, token string) *httptest.ResponseRecorder {
+	return Do(t, r, http.MethodGet, path, token, nil)
+}
+
+func DeleteJSON(t testing.TB, r *gin.Engine, path, token string) *httptest.ResponseRecorder {
+	return Do(t, r, http.MethodDelete, path, token, nil)
+}
+
+// DecodeJSON decodes the recorder body into v.
+func DecodeJSON(t testing.TB, w *httptest.ResponseRecorder, v any) {
+	t.Helper()
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), v), "decode response: %s", w.Body.String())
+}

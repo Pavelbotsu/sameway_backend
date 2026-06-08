@@ -43,6 +43,7 @@ func main() {
 	}
 
 	r.POST("/ratings", middleware.Auth(), handlers.SubmitRating)
+	r.POST("/pickup/confirm", middleware.Auth(), handlers.ConfirmPickup)
 
 	driver := r.Group("/driver", middleware.Auth(), middleware.RequireRole("driver"))
 	{
@@ -52,6 +53,7 @@ func main() {
 		driver.GET("/requests", handlers.GetRequests)
 		driver.GET("/pickup-route/:request_id", handlers.GetPickupRoute)
 		driver.PUT("/status", handlers.UpdateStatus)
+		driver.POST("/dropoff/:request_id", handlers.DropoffPassenger)
 		driver.DELETE("/route", handlers.DeleteRoute)
 		driver.DELETE("/ride/:request_id", handlers.DriverCancelRide)
 		driver.POST("/trips", handlers.PlanTrip)

@@ -23,8 +23,23 @@ func Connect() error {
 	return Migrate()
 }
 
+// Migrate runs the schema migration against the global pool. Existing
+// production call site in main.go is unaffected.
 func Migrate() error {
-	_, err := DB.Exec(context.Background(), `
+	return MigratePool(context.Background(), DB)
+}
+
+// MigratePool runs the same schema migration against an arbitrary pool. Used
+// by tests to set up a fresh container-backed database.
+func MigratePool(ctx context.Context, pool *pgxpool.Pool) error {
+	if _, err := pool.Exec(ctx, schemaSQL); err != nil {
+		return err
+	}
+	_, err := pool.Exec(ctx, alterSQL)
+	return err
+}
+
+const schemaSQL = `
 		CREATE EXTENSION IF NOT EXISTS postgis;
 
 		CREATE TABLE IF NOT EXISTS users (
@@ -43,6 +58,7 @@ func Migrate() error {
 			origin GEOGRAPHY(POINT,4326) NOT NULL,
 			destination GEOGRAPHY(POINT,4326) NOT NULL,
 			route GEOGRAPHY(LINESTRING,4326),
+			current_location GEOGRAPHY(POINT,4326),
 			corridor_km FLOAT NOT NULL DEFAULT 1.0,
 			seats INT NOT NULL DEFAULT 3,
 			status TEXT NOT NULL DEFAULT 'looking'
@@ -70,10 +86,11 @@ func Migrate() error {
 			driver_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 			passenger_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 			pickup_location GEOGRAPHY(POINT,4326),
+			pickup_code CHAR(4),
+			picked_up_at TIMESTAMPTZ,
 			status TEXT NOT NULL DEFAULT 'pending'
-				CHECK (status IN ('pending','accepted','declined','cancelled')),
-			created_at TIMESTAMPTZ DEFAULT NOW(),
-			UNIQUE(driver_id, passenger_id)
+				CHECK (status IN ('pending','accepted','in_progress','done','declined','cancelled')),
+			created_at TIMESTAMPTZ DEFAULT NOW()
 		);
 
 		CREATE TABLE IF NOT EXISTS completed_trips (
@@ -131,12 +148,9 @@ func Migrate() error {
 			created_at TIMESTAMPTZ DEFAULT NOW(),
 			UNIQUE(rater_id, ride_request_id)
 		);
-	`)
-	if err != nil {
-		return err
-	}
+`
 
-	_, err = DB.Exec(context.Background(), `
+const alterSQL = `
 		ALTER TABLE users ADD COLUMN IF NOT EXISTS car_make TEXT DEFAULT '';
 		ALTER TABLE users ADD COLUMN IF NOT EXISTS car_model TEXT DEFAULT '';
 		ALTER TABLE users ADD COLUMN IF NOT EXISTS car_color TEXT DEFAULT '';
@@ -144,6 +158,27 @@ func Migrate() error {
 		ALTER TABLE active_drivers ADD COLUMN IF NOT EXISTS seats_taken INT NOT NULL DEFAULT 0;
 		ALTER TABLE active_passengers ADD COLUMN IF NOT EXISTS destination_lat DOUBLE PRECISION;
 		ALTER TABLE active_passengers ADD COLUMN IF NOT EXISTS destination_lng DOUBLE PRECISION;
-	`)
-	return err
-}
+		ALTER TABLE active_drivers ADD COLUMN IF NOT EXISTS current_location GEOGRAPHY(POINT,4326);
+		CREATE INDEX IF NOT EXISTS idx_active_drivers_current_location
+			ON active_drivers USING GIST(current_location);
+
+		-- Replace the absolute uniqueness on ride_requests with one scoped to
+		-- active rows so cancelled/declined history coexists without blocking
+		-- new matches between the same (driver, passenger) pair.
+		ALTER TABLE ride_requests DROP CONSTRAINT IF EXISTS ride_requests_driver_id_passenger_id_key;
+
+		-- Pickup-confirmation handshake (4-digit code + timestamp). Status
+		-- gains 'in_progress' (after pickup) and 'done' (after dropoff). The
+		-- partial unique index now also covers in_progress so a passenger
+		-- can't be matched twice while in the car.
+		ALTER TABLE ride_requests ADD COLUMN IF NOT EXISTS pickup_code CHAR(4);
+		ALTER TABLE ride_requests ADD COLUMN IF NOT EXISTS picked_up_at TIMESTAMPTZ;
+		ALTER TABLE ride_requests DROP CONSTRAINT IF EXISTS ride_requests_status_check;
+		ALTER TABLE ride_requests ADD CONSTRAINT ride_requests_status_check
+			CHECK (status IN ('pending','accepted','in_progress','done','declined','cancelled'));
+
+		DROP INDEX IF EXISTS uniq_active_ride_request;
+		CREATE UNIQUE INDEX IF NOT EXISTS uniq_active_ride_request
+			ON ride_requests (driver_id, passenger_id)
+			WHERE status IN ('pending','accepted','in_progress');
+`

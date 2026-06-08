@@ -21,11 +21,13 @@ func ReapPendingRideRequests(timeoutMinutes int) {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		reapOnce(timeoutMinutes)
+		ReapStalePendingOnce(timeoutMinutes)
 	}
 }
 
-func reapOnce(timeoutMinutes int) {
+// ReapStalePendingOnce performs a single sweep. Exported so tests can invoke
+// it synchronously without depending on the ticker.
+func ReapStalePendingOnce(timeoutMinutes int) {
 	rows, err := db.DB.Query(context.Background(), `
 		UPDATE ride_requests
 		SET status = 'cancelled'
