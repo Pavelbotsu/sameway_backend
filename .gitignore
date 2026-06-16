@@ -2,6 +2,6 @@
 /db/spatial_services.go
 /docker/docker-compose.yml
 .env
-serviceAcountkey.json
+serviceAccountKey.json
 simulate.exe
 /handlers/auth.goS
