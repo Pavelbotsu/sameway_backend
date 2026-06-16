@@ -8,6 +8,8 @@ import (
 	"github.com/Pavelbotsu/sameway_backend/handlers"
 	"github.com/Pavelbotsu/sameway_backend/middleware"
 	"github.com/Pavelbotsu/sameway_backend/services"
+	"github.com/Pavelbotsu/sameway_backend/services/email"
+	"github.com/Pavelbotsu/sameway_backend/services/ranker"
 	"github.com/gin-gonic/gin"
 )
 
@@ -24,6 +26,8 @@ func main() {
 	}
 
 	services.InitFirebase()
+	ranker.Init(config.C)
+	email.Init(config.C)
 
 	r := gin.Default()
 
@@ -31,6 +35,8 @@ func main() {
 	{
 		auth.POST("/register", handlers.Register)
 		auth.POST("/login", handlers.Login)
+		auth.POST("/forgot-password", handlers.ForgotPassword)
+		auth.POST("/reset-password", handlers.ResetPassword)
 		auth.GET("/profile", middleware.Auth(), handlers.GetProfile)
 		auth.PUT("/profile", middleware.Auth(), handlers.UpdateProfile)
 		auth.POST("/switch-role", middleware.Auth(), handlers.SwitchRole)
@@ -40,10 +46,19 @@ func main() {
 		auth.GET("/stats", middleware.Auth(), handlers.GetStats)
 		auth.POST("/change-password", middleware.Auth(), handlers.ChangePassword)
 		auth.GET("/trips", middleware.Auth(), handlers.GetTripHistory)
+		auth.POST("/bug-report", middleware.Auth(), handlers.SubmitBugReport)
+		auth.POST("/test-ai", middleware.Auth(), handlers.TestAIRanker)
+		auth.POST("/email-verify/request", middleware.Auth(), handlers.RequestEmailVerify)
+		auth.POST("/email-verify/confirm", middleware.Auth(), handlers.ConfirmEmailVerify)
 	}
 
 	r.POST("/ratings", middleware.Auth(), handlers.SubmitRating)
 	r.POST("/pickup/confirm", middleware.Auth(), handlers.ConfirmPickup)
+
+	// Pickup route — accessible to both driver and passenger of the ride.
+	// The handler enforces participant-of-the-row. The driver-namespaced
+	// alias below is kept for one release so older driver builds keep working.
+	r.GET("/pickup-route/:request_id", middleware.Auth(), handlers.GetPickupRoute)
 
 	driver := r.Group("/driver", middleware.Auth(), middleware.RequireRole("driver"))
 	{
@@ -78,6 +93,8 @@ func main() {
 	{
 		chat.POST("/send", handlers.SendMessage)
 		chat.GET("/:request_id", handlers.GetMessages)
+		chat.POST("/typing", handlers.TypingStatus)
+		chat.POST("/read", handlers.MarkRead)
 	}
 
 	r.POST("/trips/search", handlers.SearchTrips)

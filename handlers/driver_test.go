@@ -216,4 +216,40 @@ func TestGetPickupRoute_ReturnsBothLegs(t *testing.T) {
 	testutil.DecodeJSON(t, w, &resp)
 	assert.NotEmpty(t, resp["pickup_wkt"])
 	assert.NotEmpty(t, resp["continuation_wkt"])
+	assert.NotEmpty(t, resp["walk_wkt"], "walking leg must be present")
+}
+
+// TestGetPickupRoute_PassengerAllowed confirms the new participant-checked
+// route lets a passenger pull their own pickup route — replaces the old
+// driver-only gate. Non-participant gets 403.
+func TestGetPickupRoute_PassengerAllowed(t *testing.T) {
+	pool, r := setupHandlers(t)
+	driverID, _ := testutil.CreateUser(t, pool, "driver", "d-pp")
+	passengerID, paxTok := testutil.CreateUser(t, pool, "passenger", "p-pp")
+	_, outsiderTok := testutil.CreateUser(t, pool, "passenger", "p-out")
+	testutil.CreateActiveDriver(t, pool, driverID,
+		testutil.LatLng{Lat: 50, Lng: 20},
+		testutil.LatLng{Lat: 50, Lng: 20.1},
+		testutil.LineStringWKT([2]float64{20, 50}, [2]float64{20.1, 50}),
+	)
+	testutil.CreateActivePassenger(t, pool, passengerID,
+		testutil.LatLng{Lat: 50, Lng: 20.05}, nil)
+	reqID, _, err := services.CreateRideRequest(driverID, passengerID, 50, 20)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx(t),
+		`UPDATE ride_requests SET status = 'accepted' WHERE id = $1`, reqID)
+	require.NoError(t, err)
+	testutil.SwapRouter(t, &testutil.MockOSRM{})
+
+	// Passenger of the row hits the new top-level route — 200.
+	w := testutil.GetJSON(t, r, "/pickup-route/"+reqID, paxTok)
+	require.Equal(t, http.StatusOK, w.Code)
+	var resp map[string]any
+	testutil.DecodeJSON(t, w, &resp)
+	assert.NotEmpty(t, resp["pickup_wkt"])
+	assert.NotEmpty(t, resp["walk_wkt"])
+
+	// Unrelated user — 403.
+	w = testutil.GetJSON(t, r, "/pickup-route/"+reqID, outsiderTok)
+	assert.Equal(t, http.StatusForbidden, w.Code)
 }

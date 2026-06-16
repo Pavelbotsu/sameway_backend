@@ -222,6 +222,99 @@ func TestFindPassengersInCorridor_DestinationFilter(t *testing.T) {
 	require.Len(t, matches, 1)
 }
 
+// TestFindPassengersInCorridor_DestinationAnchored_OutsideCorridor verifies
+// the relaxed branch of the disjunctive WHERE: a passenger far outside the
+// driver's corridor but heading to the same destination must still match.
+//
+// Geometry: driver route along the equator from 20.00→20.10 (~7.1 km E-W).
+// Passenger sits ~4.4 km north of the route at 50.04. With a 1 km corridor
+// the strict path drops them. Since their destination equals the driver's,
+// the relaxed path (walk < 5 km, ahead < 10 km) admits them and the match
+// is tagged "destination_anchored".
+func TestFindPassengersInCorridor_DestinationAnchored_OutsideCorridor(t *testing.T) {
+	pool := setup(t)
+	driverID, _ := testutil.CreateUser(t, pool, "driver", "d-da-1")
+	passengerID, _ := testutil.CreateUser(t, pool, "passenger", "p-da-1")
+
+	origin := testutil.LatLng{Lat: 50.00, Lng: 20.00}
+	dest := testutil.LatLng{Lat: 50.00, Lng: 20.10}
+	routeWKT := testutil.LineStringWKT(
+		[2]float64{20.00, 50.00},
+		[2]float64{20.10, 50.00},
+	)
+	testutil.CreateActiveDriver(t, pool, driverID, origin, dest, routeWKT)
+
+	// Passenger ~4.4 km north of the route (50.04 vs 50.00 ≈ 4.4 km), with
+	// destination matching the driver's. Strict corridor (1 km) drops them;
+	// relaxed branch should match.
+	paxDest := testutil.LatLng{Lat: 50.00, Lng: 20.10}
+	testutil.CreateActivePassenger(t, pool,
+		passengerID, testutil.LatLng{Lat: 50.04, Lng: 20.05}, &paxDest)
+
+	matches, err := services.FindPassengersInCorridor(driverID, routeWKT, 1.0, dest.Lat, dest.Lng, 10)
+	require.NoError(t, err)
+	require.Len(t, matches, 1, "destination-anchored relaxed match must fire")
+	assert.Equal(t, "destination_anchored", matches[0].MatchKind)
+	assert.Greater(t, matches[0].WalkM, 4000.0,
+		"walk distance should reflect the actual 4+ km offset")
+}
+
+// TestFindPassengersInCorridor_MatchKindCorridor verifies the strict branch
+// still labels its matches as "corridor".
+func TestFindPassengersInCorridor_MatchKindCorridor(t *testing.T) {
+	pool := setup(t)
+	driverID, _ := testutil.CreateUser(t, pool, "driver", "d-mc-1")
+	passengerID, _ := testutil.CreateUser(t, pool, "passenger", "p-mc-1")
+
+	origin := testutil.LatLng{Lat: 50.00, Lng: 20.00}
+	dest := testutil.LatLng{Lat: 50.00, Lng: 20.10}
+	routeWKT := testutil.LineStringWKT(
+		[2]float64{20.00, 50.00},
+		[2]float64{20.10, 50.00},
+	)
+	testutil.CreateActiveDriver(t, pool, driverID, origin, dest, routeWKT)
+
+	// Passenger ahead on the route, ~111 m from the route center line and
+	// ~700 m along the route from the driver — inside the 1 km corridor,
+	// 1 km walk cap, AND the 2 km early-notify ahead cap. No destination.
+	testutil.CreateActivePassenger(t, pool,
+		passengerID, testutil.LatLng{Lat: 50.001, Lng: 20.01}, nil)
+
+	matches, err := services.FindPassengersInCorridor(driverID, routeWKT, 1.0, dest.Lat, dest.Lng, 10)
+	require.NoError(t, err)
+	require.Len(t, matches, 1)
+	assert.Equal(t, "corridor", matches[0].MatchKind)
+}
+
+// TestFindPassengersInCorridor_RelaxedRequiresDestMatch verifies a passenger
+// outside the corridor with NO destination match is still dropped — relaxed
+// path is destination-gated.
+func TestFindPassengersInCorridor_RelaxedRequiresDestMatch(t *testing.T) {
+	pool := setup(t)
+	driverID, _ := testutil.CreateUser(t, pool, "driver", "d-rrdm-1")
+	passengerID, _ := testutil.CreateUser(t, pool, "passenger", "p-rrdm-1")
+
+	origin := testutil.LatLng{Lat: 50.00, Lng: 20.00}
+	dest := testutil.LatLng{Lat: 50.00, Lng: 20.10}
+	routeWKT := testutil.LineStringWKT(
+		[2]float64{20.00, 50.00},
+		[2]float64{20.10, 50.00},
+	)
+	testutil.CreateActiveDriver(t, pool, driverID, origin, dest, routeWKT)
+
+	// Same far-away passenger but with a completely different destination.
+	// Strict path drops them (corridor too narrow). Relaxed path drops them
+	// (destinations don't match). Result: 0 matches.
+	farDest := testutil.LatLng{Lat: 60.00, Lng: 30.00}
+	testutil.CreateActivePassenger(t, pool,
+		passengerID, testutil.LatLng{Lat: 50.04, Lng: 20.05}, &farDest)
+
+	matches, err := services.FindPassengersInCorridor(driverID, routeWKT, 1.0, dest.Lat, dest.Lng, 10)
+	require.NoError(t, err)
+	assert.Empty(t, matches,
+		"relaxed path must require destination match — out-of-corridor + wrong dest stays excluded")
+}
+
 // ── GetNearbyDrivers self-exclusion ─────────────────────────────────────────
 
 func TestGetNearbyDrivers_ExcludesSelf(t *testing.T) {

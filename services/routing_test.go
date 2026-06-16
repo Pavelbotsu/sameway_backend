@@ -87,3 +87,8 @@ func (s stubRouter) GetRoadRoute(_, _, _, _ float64) (*services.RouteResult, err
 	s.onCall()
 	return &services.RouteResult{}, nil
 }
+
+func (s stubRouter) GetRoute(_ string, _, _, _, _ float64) (*services.RouteResult, error) {
+	s.onCall()
+	return &services.RouteResult{}, nil
+}

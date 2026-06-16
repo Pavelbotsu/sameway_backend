@@ -18,8 +18,14 @@ type RouteResult struct {
 // RoutingClient abstracts road-route lookups so tests can swap a mock without
 // hitting OSRM. The production wiring (DefaultRoutingClient) is set at startup
 // to an OSRMClient that reads config.C.OSRMBaseURL on each call.
+//
+// GetRoute takes an OSRM profile name ("driving", "foot", "bike"). Many OSRM
+// deployments only have the driving profile compiled in — implementations
+// should fall back to a straight-line WKT for unsupported profiles rather
+// than erroring, so the caller's mini-map can still render something useful.
 type RoutingClient interface {
 	GetRoadRoute(originLat, originLng, destLat, destLng float64) (*RouteResult, error)
+	GetRoute(profile string, originLat, originLng, destLat, destLng float64) (*RouteResult, error)
 }
 
 // OSRMClient is the production implementation. BaseURL falls back to
@@ -44,9 +50,21 @@ func (c *OSRMClient) http() *http.Client {
 }
 
 func (c *OSRMClient) GetRoadRoute(originLat, originLng, destLat, destLng float64) (*RouteResult, error) {
+	return c.GetRoute("driving", originLat, originLng, destLat, destLng)
+}
+
+// GetRoute fetches a route via the given OSRM profile. Profile names match
+// OSRM's URL segment: "driving", "foot", "bike". If the deployed OSRM doesn't
+// have the requested profile compiled in, the call surfaces an error and the
+// caller is expected to gracefully degrade (the pickup-route handler returns
+// an empty WKT for that leg rather than failing the whole response).
+func (c *OSRMClient) GetRoute(profile string, originLat, originLng, destLat, destLng float64) (*RouteResult, error) {
+	if profile == "" {
+		profile = "driving"
+	}
 	url := fmt.Sprintf(
-		"%s/route/v1/driving/%f,%f;%f,%f?overview=full&geometries=geojson",
-		c.baseURL(), originLng, originLat, destLng, destLat,
+		"%s/route/v1/%s/%f,%f;%f,%f?overview=full&geometries=geojson",
+		c.baseURL(), profile, originLng, originLat, destLng, destLat,
 	)
 
 	resp, err := c.http().Get(url)
@@ -93,4 +111,10 @@ var DefaultRoutingClient RoutingClient = &OSRMClient{}
 // existing handler code can keep calling it unchanged.
 func GetRoadRoute(originLat, originLng, destLat, destLng float64) (*RouteResult, error) {
 	return DefaultRoutingClient.GetRoadRoute(originLat, originLng, destLat, destLng)
+}
+
+// GetRoute is the profile-aware variant. New callers should prefer this over
+// GetRoadRoute; the latter remains for backward compat.
+func GetRoute(profile string, originLat, originLng, destLat, destLng float64) (*RouteResult, error) {
+	return DefaultRoutingClient.GetRoute(profile, originLat, originLng, destLat, destLng)
 }

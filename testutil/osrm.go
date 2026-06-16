@@ -19,6 +19,13 @@ type MockOSRM struct {
 // set; otherwise returns a deterministic straight-line route from origin to
 // destination so any handler that needs a non-empty WKT gets one.
 func (m *MockOSRM) GetRoadRoute(originLat, originLng, destLat, destLng float64) (*services.RouteResult, error) {
+	return m.GetRoute("driving", originLat, originLng, destLat, destLng)
+}
+
+// GetRoute satisfies the profile-aware part of services.RoutingClient. The
+// mock ignores the profile and returns a straight-line route — sufficient
+// for handler tests that only assert "we got some WKT back".
+func (m *MockOSRM) GetRoute(_ string, originLat, originLng, destLat, destLng float64) (*services.RouteResult, error) {
 	if m.Default != nil {
 		return m.Default, nil
 	}

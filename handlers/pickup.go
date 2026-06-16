@@ -9,12 +9,15 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// ConfirmPickup is the symmetric pickup-handshake endpoint. Either the
-// passenger or the driver may submit the 4-digit code that was generated when
-// the ride was accepted; the first valid submission flips the ride_request to
-// `in_progress` and emits a `pickup_confirmed` WS event to the other party.
-// Subsequent submissions on an already-in-progress row are no-op idempotent
-// 200 responses — they don't fire a second WS event.
+// ConfirmPickup is the pickup-handshake endpoint. The driver knows the
+// 4-digit code (it's stamped on their `ride_response` WS payload and the
+// `/driver/requests` JSON); the passenger has to ask the driver verbally
+// what it is and type it in here. The asymmetry is the point: a successful
+// submission proves the two parties physically met.
+//
+// Drivers are explicitly forbidden from submitting their own code (D2 in the
+// pickup-handshake plan). Subsequent submissions on an already-in-progress
+// row return a 200 with `{already: true}` and do not fire a second WS event.
 func ConfirmPickup(c *gin.Context) {
 	var req struct {
 		RequestID string `json:"request_id" binding:"required"`
@@ -48,6 +51,14 @@ func ConfirmPickup(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "not a participant on this ride"})
 		return
 	}
+	// Asymmetric handshake: only the passenger may submit the code. The
+	// driver has it on their screen; they hand it off verbally as proof of
+	// physical meeting. See D2 in the matching + pickup-code plan.
+	if userID == driverID {
+		c.JSON(http.StatusForbidden,
+			gin.H{"error": "only the passenger can confirm pickup"})
+		return
+	}
 
 	// Idempotent: if already in_progress, return 200 with a sentinel so the
 	// client can stop showing the confirm UI without panicking.
@@ -77,16 +88,11 @@ func ConfirmPickup(c *gin.Context) {
 		return
 	}
 
-	payload := gin.H{
+	// The driver is the "other party" — the submitter is always the passenger.
+	Hub.SendToUser(driverID, "pickup_confirmed", gin.H{
 		"request_id": req.RequestID,
 		"by_user_id": userID,
-	}
-	// Notify the *other* party. The submitter already knows.
-	if userID == driverID {
-		Hub.SendToUser(passengerID, "pickup_confirmed", payload)
-	} else {
-		Hub.SendToUser(driverID, "pickup_confirmed", payload)
-	}
+	})
 
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

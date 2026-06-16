@@ -302,13 +302,14 @@ func TestPickupHandshakeAndDropoff(t *testing.T) {
 	code := payload["pickup_code"].(string)
 	require.Len(t, code, 4, "pickup code should be a 4-digit string")
 
-	// Driver enters the code → backend flips to in_progress → passenger
-	// receives pickup_confirmed WS.
-	w = testutil.PostJSON(t, r, "/pickup/confirm", driverTok, map[string]any{
+	// Passenger asks the driver for the code (driver has it on their screen),
+	// types it in — backend flips to in_progress → driver receives
+	// pickup_confirmed WS. Asymmetric: driver can NOT submit (gets 403).
+	w = testutil.PostJSON(t, r, "/pickup/confirm", paxTok, map[string]any{
 		"request_id": reqID, "code": code,
 	})
 	require.Equal(t, http.StatusOK, w.Code)
-	evtType, _ = testutil.ReadEvent(t, paxConn, 2*time.Second)
+	evtType, _ = testutil.ReadEvent(t, driverConn, 2*time.Second)
 	assert.Equal(t, "pickup_confirmed", evtType)
 
 	var status string

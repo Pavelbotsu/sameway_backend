@@ -49,19 +49,26 @@ func TestPickupConfirm_HappyPathPassenger(t *testing.T) {
 	require.NotNil(t, pickedUpAt)
 }
 
-func TestPickupConfirm_HappyPathDriver(t *testing.T) {
+// TestPickupConfirm_DriverForbidden verifies the asymmetric handshake: the
+// driver has the code on their screen but is explicitly NOT allowed to
+// submit it themselves — proving the passenger had to ask for it verbally
+// (and therefore the two parties physically met). See D2 in the plan.
+func TestPickupConfirm_DriverForbidden(t *testing.T) {
 	reqID, code, driverTok, _ := seedAcceptedRide(t)
 	pool, r := handlersPool, testutil.NewTestRouter()
 
 	w := testutil.PostJSON(t, r, "/pickup/confirm", driverTok, map[string]any{
 		"request_id": reqID, "code": code,
 	})
-	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), "only the passenger")
 
+	// Status must not have changed.
 	var status string
 	require.NoError(t, pool.QueryRow(ctx(t),
 		`SELECT status FROM ride_requests WHERE id = $1`, reqID).Scan(&status))
-	assert.Equal(t, "in_progress", status)
+	assert.Equal(t, "accepted", status,
+		"driver-side submission must be rejected without mutating state")
 }
 
 func TestPickupConfirm_WrongCode(t *testing.T) {
@@ -96,7 +103,7 @@ func TestPickupConfirm_NonParticipantForbidden(t *testing.T) {
 }
 
 func TestPickupConfirm_Idempotent(t *testing.T) {
-	reqID, code, driverTok, paxTok := seedAcceptedRide(t)
+	reqID, code, _, paxTok := seedAcceptedRide(t)
 	pool, r := handlersPool, testutil.NewTestRouter()
 
 	// First submission: passenger flips it to in_progress.
@@ -105,8 +112,9 @@ func TestPickupConfirm_Idempotent(t *testing.T) {
 	})
 	require.Equal(t, http.StatusOK, w.Code)
 
-	// Second submission: driver hits 200 with already=true. No mutation.
-	w = testutil.PostJSON(t, r, "/pickup/confirm", driverTok, map[string]any{
+	// Second submission by the same passenger: 200 + already=true, no
+	// mutation. The driver can't submit at all (D2).
+	w = testutil.PostJSON(t, r, "/pickup/confirm", paxTok, map[string]any{
 		"request_id": reqID, "code": code,
 	})
 	require.Equal(t, http.StatusOK, w.Code)

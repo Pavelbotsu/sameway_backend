@@ -175,6 +175,17 @@ func TestChangePassword_BadCurrent(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
+func TestChangePassword_RejectsSameAsCurrent(t *testing.T) {
+	pool, r := setupHandlers(t)
+	_, tok := testutil.CreateUser(t, pool, "driver", "u-same")
+	w := testutil.PostJSON(t, r, "/auth/change-password", tok, map[string]any{
+		"current_password": "test-pass",
+		"new_password":     "test-pass",
+	})
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "differ from current")
+}
+
 func TestChangePassword_GoodRoundTrip(t *testing.T) {
 	pool, r := setupHandlers(t)
 	_, tok := testutil.CreateUser(t, pool, "driver", "u1")

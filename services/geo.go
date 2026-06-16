@@ -29,15 +29,27 @@ const (
 	aheadToleranceFraction = 0.01
 )
 
+// Relaxed bounds — applied only when the passenger's declared destination is
+// within destinationMatchMeters of the driver's destination. Real users think
+// "we're going the same way" and are willing to walk farther / wait longer
+// for that, so we widen the walk + ahead caps when destinations match. See
+// FindPassengersInCorridor for the disjunctive WHERE.
+const (
+	relaxedMaxWalkM           = 5000
+	relaxedEarlyNotifyRadiusM = 10000
+)
+
 // CorridorMatch is the result row of the heading-aware corridor query: the
 // matched passenger, the suggested pickup point on the driver's road, and the
-// two distances the UI needs to render walk/drive ETAs.
+// two distances the UI needs to render walk/drive ETAs. MatchKind tags which
+// branch of the disjunctive WHERE fired (see FindPassengersInCorridor).
 type CorridorMatch struct {
 	User            models.User
 	PickupLat       float64
 	PickupLng       float64
 	WalkM           float64
 	DriverToPickupM float64
+	MatchKind       string // "corridor" | "destination_anchored"
 }
 
 func UpsertActiveDriver(driverID, routeWKT string, originLat, originLng, destLat, destLng, corridorKm float64, seats int) error {
@@ -65,12 +77,23 @@ func UpsertActiveDriver(driverID, routeWKT string, originLat, originLng, destLat
 	return err
 }
 
-// FindPassengersInCorridor matches passengers who are (a) inside the driver's
-// corridor, (b) AHEAD of the driver's current position along the route, (c)
-// within earlyNotifyRadiusM ahead, and (d) within maxWalkM of the road. For
-// each match it computes the suggested pickup point on the road
-// (ST_ClosestPoint), the passenger's walking distance to that point, and the
-// driver's along-route distance to that point.
+// FindPassengersInCorridor matches passengers who are (a) AHEAD of the
+// driver's current position along the route and (b) satisfy one of two
+// inclusion rules:
+//
+//   - Strict corridor: walk < maxWalkM (1 km), ahead < earlyNotifyRadiusM
+//     (2 km), and either no declared destination or destinations match.
+//   - Destination-anchored relaxed: declared destination is within
+//     destinationMatchMeters (1.5 km) of the driver's, walk < relaxedMaxWalkM
+//     (5 km), ahead < relaxedEarlyNotifyRadiusM (10 km).
+//
+// Real users care about "we're going the same way," not corridor radius — so
+// when destinations match we let geometry stretch. The match_kind column
+// surfaces which branch fired so the Flutter UI can render a "long walk"
+// banner for the relaxed path.
+//
+// The CTE pre-filters with the larger of the two radii so PostGIS gets a
+// single bounding ST_DWithin and the disjunction in the outer WHERE refines.
 func FindPassengersInCorridor(driverID, routeWKT string, corridorKm, destLat, destLng float64, limit int) ([]CorridorMatch, error) {
 	rows, err := db.DB.Query(context.Background(), `
 		WITH route_info AS (
@@ -85,17 +108,26 @@ func FindPassengersInCorridor(driverID, routeWKT string, corridorKm, destLat, de
 		),
 		candidates AS (
 			SELECT u.id, u.name, COALESCE(u.fcm_token, '') AS fcm_token,
+			       ap.destination_lat,
 			       ap.location AS pax_loc,
 			       ST_LineLocatePoint(ri.route_geom, ap.location::geometry) AS pax_frac,
 			       ST_ClosestPoint(ri.route_geom, ap.location::geometry)::geography AS pickup_geog,
-			       ri.route_len_m, ri.driver_frac
+			       ri.route_len_m, ri.driver_frac,
+			       (
+			           ap.destination_lat IS NOT NULL
+			           AND ST_DWithin(
+			               ST_SetSRID(ST_MakePoint(ap.destination_lng, ap.destination_lat), 4326)::geography,
+			               ST_SetSRID(ST_MakePoint($5, $4), 4326)::geography,
+			               $6
+			           )
+			       ) AS dest_match
 			FROM active_passengers ap
 			JOIN users u ON u.id = ap.passenger_id
 			CROSS JOIN route_info ri
 			WHERE ST_DWithin(
 				ap.location::geography,
 				ST_GeogFromText($2),
-				$3 * 1000
+				GREATEST($3 * 1000, $11)
 			)
 			AND ap.updated_at > NOW() - INTERVAL '10 minutes'
 			AND NOT EXISTS (
@@ -103,30 +135,48 @@ func FindPassengersInCorridor(driverID, routeWKT string, corridorKm, destLat, de
 				WHERE rr.passenger_id = u.id
 				  AND rr.status IN ('pending','accepted')
 			)
-			AND (
-				ap.destination_lat IS NULL
-				OR ST_DWithin(
-					ST_SetSRID(ST_MakePoint(ap.destination_lng, ap.destination_lat), 4326)::geography,
-					ST_SetSRID(ST_MakePoint($5, $4), 4326)::geography,
-					$6
-				)
-			)
+		),
+		scored AS (
+			SELECT *,
+			       ST_Distance(pax_loc, pickup_geog) AS walk_m,
+			       (pax_frac - driver_frac) * route_len_m AS driver_to_pickup_m
+			FROM candidates
 		)
 		SELECT id, name, fcm_token,
 		       ST_Y(pickup_geog::geometry), ST_X(pickup_geog::geometry),
-		       ST_Distance(pax_loc, pickup_geog) AS walk_m,
-		       (pax_frac - driver_frac) * route_len_m AS driver_to_pickup_m
-		FROM candidates
+		       walk_m,
+		       driver_to_pickup_m,
+		       CASE
+		           WHEN dest_match AND (walk_m >= $8 OR driver_to_pickup_m >= $9)
+		           THEN 'destination_anchored'
+		           ELSE 'corridor'
+		       END AS match_kind
+		FROM scored
 		WHERE pax_frac > driver_frac + $7
-		  AND ST_Distance(pax_loc, pickup_geog) < $8
-		  AND (pax_frac - driver_frac) * route_len_m < $9
+		  AND (
+		      -- Strict corridor branch
+		      (
+		          walk_m < $3 * 1000
+		          AND walk_m < $8
+		          AND driver_to_pickup_m < $9
+		          AND (destination_lat IS NULL OR dest_match)
+		      )
+		      OR
+		      -- Destination-anchored relaxed branch
+		      (
+		          dest_match
+		          AND walk_m < $11
+		          AND driver_to_pickup_m < $12
+		      )
+		  )
 		ORDER BY driver_to_pickup_m ASC
 		LIMIT $10
 	`,
 		driverID, routeWKT, corridorKm,
-		destLat, destLng, destinationMatchMeters,
+		destLat, destLng, float64(destinationMatchMeters),
 		aheadToleranceFraction, float64(maxWalkM), float64(earlyNotifyRadiusM),
 		limit,
+		float64(relaxedMaxWalkM), float64(relaxedEarlyNotifyRadiusM),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("corridor query: %w", err)
@@ -140,6 +190,7 @@ func FindPassengersInCorridor(driverID, routeWKT string, corridorKm, destLat, de
 			&m.User.ID, &m.User.Name, &m.User.FCMToken,
 			&m.PickupLat, &m.PickupLng,
 			&m.WalkM, &m.DriverToPickupM,
+			&m.MatchKind,
 		); err != nil {
 			return nil, err
 		}
@@ -212,7 +263,7 @@ func GetDriverRequests(driverID string) ([]models.RideRequest, error) {
 		       COALESCE(ST_Y(rr.pickup_location::geometry), 0),
 		       COALESCE(ST_X(rr.pickup_location::geometry), 0),
 		       rr.status, rr.created_at,
-		       u.name,
+		       u.name, COALESCE(u.photo_url, ''),
 		       COALESCE(AVG(r.stars), 0), COUNT(r.id),
 		       COALESCE(rr.pickup_code, ''), rr.picked_up_at
 		FROM ride_requests rr
@@ -221,7 +272,8 @@ func GetDriverRequests(driverID string) ([]models.RideRequest, error) {
 		WHERE rr.driver_id = $1
 		  AND rr.status IN ('pending','accepted','in_progress')
 		GROUP BY rr.id, rr.driver_id, rr.passenger_id, rr.pickup_location,
-		         rr.status, rr.created_at, u.name, rr.pickup_code, rr.picked_up_at
+		         rr.status, rr.created_at, u.name, u.photo_url,
+		         rr.pickup_code, rr.picked_up_at
 		ORDER BY rr.created_at DESC
 	`, driverID)
 	if err != nil {
@@ -236,7 +288,7 @@ func GetDriverRequests(driverID string) ([]models.RideRequest, error) {
 			&r.ID, &r.DriverID, &r.PassengerID,
 			&r.PickupLat, &r.PickupLng,
 			&r.Status, &r.CreatedAt,
-			&r.PassengerName,
+			&r.PassengerName, &r.PassengerPhotoURL,
 			&r.PassengerAvgRating, &r.PassengerRatingCount,
 			&r.PickupCode, &r.PickedUpAt,
 		); err != nil {

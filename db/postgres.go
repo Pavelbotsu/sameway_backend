@@ -155,6 +155,9 @@ const alterSQL = `
 		ALTER TABLE users ADD COLUMN IF NOT EXISTS car_model TEXT DEFAULT '';
 		ALTER TABLE users ADD COLUMN IF NOT EXISTS car_color TEXT DEFAULT '';
 		ALTER TABLE users ADD COLUMN IF NOT EXISTS car_plate TEXT DEFAULT '';
+		-- Phase 1.3 (UX readiness): profile photo URL. Hosted on Firebase
+		-- Storage; NULL/empty means use initials fallback in the UI.
+		ALTER TABLE users ADD COLUMN IF NOT EXISTS photo_url TEXT;
 		ALTER TABLE active_drivers ADD COLUMN IF NOT EXISTS seats_taken INT NOT NULL DEFAULT 0;
 		ALTER TABLE active_passengers ADD COLUMN IF NOT EXISTS destination_lat DOUBLE PRECISION;
 		ALTER TABLE active_passengers ADD COLUMN IF NOT EXISTS destination_lng DOUBLE PRECISION;
@@ -181,4 +184,62 @@ const alterSQL = `
 		CREATE UNIQUE INDEX IF NOT EXISTS uniq_active_ride_request
 			ON ride_requests (driver_id, passenger_id)
 			WHERE status IN ('pending','accepted','in_progress');
+
+		-- Bug reports: in-app feedback channel. Read with psql; future
+		-- versions may forward to email/Slack.
+		CREATE TABLE IF NOT EXISTS bug_reports (
+			id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			title       TEXT NOT NULL,
+			body        TEXT NOT NULL,
+			app_version TEXT,
+			device_info TEXT,
+			created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS bug_reports_created_at_idx
+			ON bug_reports (created_at DESC);
+
+		-- Password reset codes. Keyed by email so we can return
+		-- "if an account exists, a code was sent" without leaking enumeration.
+		-- Rows are short-lived (15 minute expiry); cleanup is on next request
+		-- for the same email or via periodic delete (left for ops).
+		CREATE TABLE IF NOT EXISTS password_resets (
+			email      TEXT PRIMARY KEY,
+			code       CHAR(6) NOT NULL,
+			expires_at TIMESTAMPTZ NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+
+		-- Phase 2.3 (UX readiness): message read receipts. NULL until the
+		-- recipient's chat screen marks the message read; once stamped, the
+		-- sender's UI flips ✓ → ✓✓.
+		ALTER TABLE messages ADD COLUMN IF NOT EXISTS read_at TIMESTAMPTZ;
+
+		-- Phase 3.2 (UX readiness): identity-verified flag. Always FALSE
+		-- until a future ID-verification flow flips it. The UI gates the
+		-- check-overlay on TRUE only, so unverified users never see a
+		-- "not verified" negative signal.
+		ALTER TABLE users ADD COLUMN IF NOT EXISTS verified BOOLEAN NOT NULL DEFAULT FALSE;
+
+		-- Phase 3.3 (UX readiness): profile-completion fields.
+		--   bio              — one-line public bio (160 char cap enforced
+		--                      at the API layer).
+		--   phone            — E.164-ish raw text; we don't enforce a strict
+		--                      format here so the user can type "+44 7700…"
+		--                      with spaces. Future Twilio integration would
+		--                      normalize on its way in.
+		--   email_verified_at — non-null once the user confirms the code.
+		ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT NOT NULL DEFAULT '';
+		ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT NOT NULL DEFAULT '';
+		ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ;
+
+		-- Outstanding email-verification codes. Same shape as
+		-- password_resets so the email infra is reused 1:1. Rows are
+		-- short-lived (15 minute expiry) and cleared on confirm.
+		CREATE TABLE IF NOT EXISTS email_verifications (
+			user_id    UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+			code       CHAR(6) NOT NULL,
+			expires_at TIMESTAMPTZ NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
 `

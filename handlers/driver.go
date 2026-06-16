@@ -12,6 +12,7 @@ import (
 	"github.com/Pavelbotsu/sameway_backend/db"
 	"github.com/Pavelbotsu/sameway_backend/models"
 	"github.com/Pavelbotsu/sameway_backend/services"
+	"github.com/Pavelbotsu/sameway_backend/services/ranker"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 )
@@ -66,7 +67,7 @@ func rerunCorridorMatch(driverID string) {
 	if err != nil || len(matches) == 0 {
 		return
 	}
-	notifyCorridorMatches(driverID, matches, destLat, destLng, corridorKm, seats)
+	notifyCorridorMatches(driverID, matches, destLat, destLng, corridorKm, seats, false)
 }
 
 func SetRoute(c *gin.Context) {
@@ -77,6 +78,7 @@ func SetRoute(c *gin.Context) {
 		DestinationLng float64 `json:"destination_lng" binding:"required"`
 		CorridorKm     float64 `json:"corridor_km" binding:"required"`
 		Seats          int     `json:"seats" binding:"required,min=1"`
+		PreferAI       bool    `json:"prefer_ai"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -113,7 +115,7 @@ func SetRoute(c *gin.Context) {
 	notified := notifyCorridorMatches(
 		driverID, matches,
 		req.DestinationLat, req.DestinationLng,
-		req.CorridorKm, req.Seats,
+		req.CorridorKm, req.Seats, req.PreferAI,
 	)
 
 	c.JSON(http.StatusOK, gin.H{
@@ -128,29 +130,38 @@ func SetRoute(c *gin.Context) {
 // passengers we hadn't already notified. Returns the count of fresh
 // notifications. Shared between SetRoute and the throttled re-run in
 // UpdateLocation.
+//
+// preferAI is a per-call opt-in. When true and ranker.Active is an AI ranker,
+// matches are reordered by AI score and tagged with `match_method` on the WS
+// payload. On any AI failure the order falls back to the SQL-original
+// (geometric) and the tag becomes "geometric_fallback".
 func notifyCorridorMatches(
 	driverID string,
 	matches []services.CorridorMatch,
 	destLat, destLng, corridorKm float64, seats int,
+	preferAI bool,
 ) int {
 	var (
-		driverName, carMake, carModel, carColor, carPlate string
-		driverAvgRating                                   float64
-		driverRatingCount                                 int
+		driverName, carMake, carModel, carColor, carPlate, photoURL string
+		driverAvgRating                                             float64
+		driverRatingCount                                           int
 	)
 	db.DB.QueryRow(context.Background(), `
 		SELECT u.name,
 		       COALESCE(u.car_make,''), COALESCE(u.car_model,''),
 		       COALESCE(u.car_color,''), COALESCE(u.car_plate,''),
+		       COALESCE(u.photo_url,''),
 		       COALESCE(AVG(r.stars), 0), COUNT(r.id)
 		FROM users u
 		LEFT JOIN ratings r ON r.rated_id = u.id
 		WHERE u.id = $1
-		GROUP BY u.id, u.name, u.car_make, u.car_model, u.car_color, u.car_plate
-	`, driverID).Scan(&driverName, &carMake, &carModel, &carColor, &carPlate, &driverAvgRating, &driverRatingCount)
+		GROUP BY u.id, u.name, u.car_make, u.car_model, u.car_color, u.car_plate, u.photo_url
+	`, driverID).Scan(&driverName, &carMake, &carModel, &carColor, &carPlate, &photoURL, &driverAvgRating, &driverRatingCount)
+
+	ordered, methodTag := rankAndReorder(matches, driverID, corridorKm, seats, preferAI)
 
 	notified := 0
-	for _, m := range matches {
+	for _, m := range ordered {
 		requestID, isNew, err := services.CreateRideRequest(driverID, m.User.ID, m.PickupLat, m.PickupLng)
 		if err != nil || !isNew {
 			continue
@@ -160,6 +171,7 @@ func notifyCorridorMatches(
 			"request_id":                  requestID,
 			"driver_id":                   driverID,
 			"driver_name":                 driverName,
+			"driver_photo_url":            photoURL,
 			"driver_avg_rating":           driverAvgRating,
 			"driver_rating_count":         driverRatingCount,
 			"car_make":                    carMake,
@@ -174,10 +186,123 @@ func notifyCorridorMatches(
 			"pickup_lng":                  m.PickupLng,
 			"walk_distance_m":             m.WalkM,
 			"driver_distance_to_pickup_m": m.DriverToPickupM,
+			"match_method":                methodTag,
+			"match_kind":                  m.MatchKind,
 		})
 		notified++
 	}
 	return notified
+}
+
+// rankAndReorder runs the configured ranker over the matches and returns them
+// reordered by descending score, plus the method tag for the WS payload. If
+// preferAI is false or ranker.Active is the geometric passthrough, the input
+// order is preserved. Errors are swallowed (fall back to the SQL ordering and
+// tag the result as "geometric_fallback").
+func rankAndReorder(
+	matches []services.CorridorMatch,
+	driverID string, corridorKm float64, seats int,
+	preferAI bool,
+) ([]services.CorridorMatch, string) {
+	if len(matches) <= 1 {
+		return matches, ranker.GeometricRanker{}.Name()
+	}
+	chosen := ranker.MatchRanker(ranker.GeometricRanker{})
+	if preferAI {
+		chosen = ranker.Active
+	}
+	cands := make([]ranker.Candidate, len(matches))
+	passengerIDs := make([]string, len(matches))
+	for i, m := range matches {
+		cands[i] = ranker.Candidate{
+			UserID:          m.User.ID,
+			Name:            m.User.Name,
+			WalkM:           m.WalkM,
+			DriverToPickupM: m.DriverToPickupM,
+		}
+		passengerIDs[i] = m.User.ID
+	}
+	// Best-effort batch rating lookup so the LLM has more to weigh than
+	// raw distance. Falls back to 0/0 on error — the ranker handles that.
+	if ratings, err := fetchPassengerRatings(passengerIDs); err == nil {
+		for i := range cands {
+			if r, ok := ratings[cands[i].UserID]; ok {
+				cands[i].AvgRating = r.Avg
+				cands[i].RatingCount = r.Count
+			}
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	results, err := chosen.Rank(ctx, cands, ranker.RankContext{
+		DriverID: driverID, CorridorKm: corridorKm, Seats: seats,
+	})
+	if err != nil {
+		log.Printf("ranker %s failed: %v — falling back to geometric", chosen.Name(), err)
+		return matches, "geometric_fallback"
+	}
+	// Reorder by results, preserving original entries that the ranker omitted.
+	posByID := make(map[string]int, len(results))
+	for i, r := range results {
+		posByID[r.UserID] = i
+	}
+	ordered := make([]services.CorridorMatch, len(matches))
+	copy(ordered, matches)
+	sortStable(ordered, func(a, b services.CorridorMatch) bool {
+		ai, aok := posByID[a.User.ID]
+		bi, bok := posByID[b.User.ID]
+		switch {
+		case aok && bok:
+			return ai < bi
+		case aok:
+			return true
+		case bok:
+			return false
+		}
+		return false
+	})
+	return ordered, chosen.Name()
+}
+
+type ratingAgg struct {
+	Avg   float64
+	Count int
+}
+
+func fetchPassengerRatings(ids []string) (map[string]ratingAgg, error) {
+	out := make(map[string]ratingAgg, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := db.DB.Query(context.Background(), `
+		SELECT rated_id, COALESCE(AVG(stars), 0), COUNT(id)
+		FROM ratings
+		WHERE rated_id = ANY($1)
+		GROUP BY rated_id
+	`, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var agg ratingAgg
+		if err := rows.Scan(&id, &agg.Avg, &agg.Count); err != nil {
+			return nil, err
+		}
+		out[id] = agg
+	}
+	return out, nil
+}
+
+// sortStable is a tiny stable bubble-sort-via-insertion wrapper so we avoid
+// pulling sort.SliceStable's reflection cost in a hot path.
+func sortStable[T any](xs []T, less func(a, b T) bool) {
+	for i := 1; i < len(xs); i++ {
+		for j := i; j > 0 && less(xs[j], xs[j-1]); j-- {
+			xs[j], xs[j-1] = xs[j-1], xs[j]
+		}
+	}
 }
 
 func UpdateLocation(c *gin.Context) {
@@ -376,26 +501,48 @@ func DropoffPassenger(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
-// GetPickupRoute returns two OSRM road routes for an accepted ride:
-// driver→passenger (pickup leg) and passenger→destination (continuation leg).
-// On OSRM failure the failing leg returns wkt:"" and distance:0 instead of
-// erroring the whole response — partial routing info is still useful.
+// GetPickupRoute returns three OSRM road routes for an accepted ride:
+//
+//   - pickup_wkt: driver → pickup point on the road (driving)
+//   - continuation_wkt: pickup point → driver's destination (driving)
+//   - walk_wkt: passenger's current location → pickup point (walking)
+//
+// The pickup point is taken from `ride_requests.pickup_location` (set at
+// match time as the projection of the passenger onto the driver's route), so
+// even destination-anchored matches where the passenger is several km off
+// the route still get a sensible road-side pickup.
+//
+// Either the driver or the passenger of the ride may call this — the
+// participant check below replaces the older driver-only gate. On OSRM
+// failure the failing leg returns wkt:"" and distance:0 so the UI can still
+// render whatever legs succeeded.
 func GetPickupRoute(c *gin.Context) {
 	requestID := c.Param("request_id")
-	driverID := c.GetString("user_id")
+	userID := c.GetString("user_id")
 	ctx := c.Request.Context()
 
-	var passengerID string
+	var driverID, passengerID, status string
+	var pickupLat, pickupLng float64
 	err := db.DB.QueryRow(ctx, `
-		SELECT passenger_id FROM ride_requests
-		WHERE id = $1 AND driver_id = $2 AND status = 'accepted'
-	`, requestID, driverID).Scan(&passengerID)
+		SELECT driver_id, passenger_id, status,
+		       ST_Y(pickup_location::geometry), ST_X(pickup_location::geometry)
+		FROM ride_requests
+		WHERE id = $1
+	`, requestID).Scan(&driverID, &passengerID, &status, &pickupLat, &pickupLng)
 	if errors.Is(err, pgx.ErrNoRows) {
-		c.JSON(http.StatusNotFound, gin.H{"error": "request not accepted or not yours"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "ride request not found"})
 		return
 	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	if userID != driverID && userID != passengerID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "not a participant"})
+		return
+	}
+	if status != "accepted" && status != "in_progress" {
+		c.JSON(http.StatusConflict, gin.H{"error": "ride not in pickup phase"})
 		return
 	}
 
@@ -422,16 +569,23 @@ func GetPickupRoute(c *gin.Context) {
 
 	pickupWkt := ""
 	pickupKm := 0.0
-	if r, err := services.GetRoadRoute(driverLat, driverLng, passengerLat, passengerLng); err == nil {
+	if r, err := services.GetRoute("driving", driverLat, driverLng, pickupLat, pickupLng); err == nil {
 		pickupWkt = r.WKT
 		pickupKm = r.DistanceKm
 	}
 
 	continuationWkt := ""
 	continuationKm := 0.0
-	if r, err := services.GetRoadRoute(passengerLat, passengerLng, destLat, destLng); err == nil {
+	if r, err := services.GetRoute("driving", pickupLat, pickupLng, destLat, destLng); err == nil {
 		continuationWkt = r.WKT
 		continuationKm = r.DistanceKm
+	}
+
+	walkWkt := ""
+	walkKm := 0.0
+	if r, err := services.GetRoute("foot", passengerLat, passengerLng, pickupLat, pickupLng); err == nil {
+		walkWkt = r.WKT
+		walkKm = r.DistanceKm
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -439,6 +593,8 @@ func GetPickupRoute(c *gin.Context) {
 		"pickup_distance_km":       pickupKm,
 		"continuation_wkt":         continuationWkt,
 		"continuation_distance_km": continuationKm,
+		"walk_wkt":                 walkWkt,
+		"walk_distance_km":         walkKm,
 	})
 }
 
@@ -558,11 +714,12 @@ func driverRespondDecline(c *gin.Context, driverID, requestID string) {
 		return
 	}
 
-	name, avg, count, carMake, carModel, carColor, carPlate := loadDriverProfile(driverID)
+	name, avg, count, carMake, carModel, carColor, carPlate, photoURL := loadDriverProfile(driverID)
 	Hub.SendToUser(passengerID, "driver_response", gin.H{
 		"request_id":          requestID,
 		"driver_id":           driverID,
 		"driver_name":         name,
+		"driver_photo_url":    photoURL,
 		"driver_avg_rating":   avg,
 		"driver_rating_count": count,
 		"car_make":            carMake,
@@ -670,13 +827,18 @@ func driverRespondAccept(c *gin.Context, driverID, requestID string) {
 	}
 
 	// 5) Post-commit WS notifications.
-	name, avg, count, carMake, carModel, carColor, carPlate := loadDriverProfile(driverID)
+	name, avg, count, carMake, carModel, carColor, carPlate, photoURL := loadDriverProfile(driverID)
 	// Pickup-confirmation code: same as the passenger-side respondAccept path.
 	pickupCode, _ := services.SetPickupCode(ctx, requestID)
+	// Asymmetric pickup code: the passenger never sees the code (D1). They
+	// must ask the driver verbally — that's the whole point of the handshake
+	// as proof of physical meeting. The driver still gets the code below.
+	_ = pickupCode
 	Hub.SendToUser(passengerID, "driver_response", gin.H{
 		"request_id":          requestID,
 		"driver_id":           driverID,
 		"driver_name":         name,
+		"driver_photo_url":    photoURL,
 		"driver_avg_rating":   avg,
 		"driver_rating_count": count,
 		"car_make":            carMake,
@@ -684,7 +846,6 @@ func driverRespondAccept(c *gin.Context, driverID, requestID string) {
 		"car_color":           carColor,
 		"car_plate":           carPlate,
 		"status":              "accepted",
-		"pickup_code":         pickupCode,
 	})
 	for _, b := range bumpedRows {
 		Hub.SendToUser(b.DriverID, "ride_cancelled", gin.H{
@@ -697,16 +858,17 @@ func driverRespondAccept(c *gin.Context, driverID, requestID string) {
 }
 
 func loadDriverProfile(driverID string) (name string, avgRating float64, ratingCount int,
-	carMake, carModel, carColor, carPlate string) {
+	carMake, carModel, carColor, carPlate, photoURL string) {
 	db.DB.QueryRow(context.Background(), `
 		SELECT u.name,
 		       COALESCE(u.car_make,''), COALESCE(u.car_model,''),
 		       COALESCE(u.car_color,''), COALESCE(u.car_plate,''),
+		       COALESCE(u.photo_url,''),
 		       COALESCE(AVG(r.stars), 0), COUNT(r.id)
 		FROM users u
 		LEFT JOIN ratings r ON r.rated_id = u.id
 		WHERE u.id = $1
-		GROUP BY u.id, u.name, u.car_make, u.car_model, u.car_color, u.car_plate
-	`, driverID).Scan(&name, &carMake, &carModel, &carColor, &carPlate, &avgRating, &ratingCount)
+		GROUP BY u.id, u.name, u.car_make, u.car_model, u.car_color, u.car_plate, u.photo_url
+	`, driverID).Scan(&name, &carMake, &carModel, &carColor, &carPlate, &photoURL, &avgRating, &ratingCount)
 	return
 }

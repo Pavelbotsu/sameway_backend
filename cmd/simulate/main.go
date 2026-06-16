@@ -24,7 +24,7 @@ const wsBase = "ws://localhost:8080"
 const (
 	//latCenter = 50.06465 // Krakow center
 	//lngCenter = 19.94498
-	latCenter = 50.08811 // Krakow center
+	latCenter = 50.06811 // Krakow center
 	lngCenter = 20.02456
 	spread    = 0.02 // ~5 km
 )
@@ -188,10 +188,10 @@ func registerAll(prefix, role string, n int) []user {
 // `driver_response` (passenger-initiated flow — confirms the driver accepted).
 
 var (
-	wsOffersReceived    int64 // ride_request events (driver-initiated)
-	wsAccepted          int64 // passenger /respond accept calls
-	driverResponseEvts  int64 // driver_response received (passenger-initiated)
-	wsErrors            int64
+	wsOffersReceived   int64 // ride_request events (driver-initiated)
+	wsAccepted         int64 // passenger /respond accept calls
+	driverResponseEvts int64 // driver_response received (passenger-initiated)
+	wsErrors           int64
 )
 
 func listenPassenger(u user, wg *sync.WaitGroup) {
