@@ -4,3 +4,4 @@
 .env
 serviceAcountkey.json
 simulate.exe
+/handlers/auth.goS
