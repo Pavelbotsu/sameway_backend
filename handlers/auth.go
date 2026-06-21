@@ -277,6 +277,10 @@ func ChangePassword(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if req.NewPassword == req.CurrentPassword {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "new password must differ from current"})
+		return
+	}
 	userID := c.GetString("user_id")
 	var hash string
 	err := db.DB.QueryRow(context.Background(),

@@ -5,178 +5,188 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/Pavelbotsu/sameway_backend/config"
 	"github.com/Pavelbotsu/sameway_backend/db"
 	"github.com/Pavelbotsu/sameway_backend/models"
 	"github.com/jackc/pgx/v5"
 )
 
-// destinationMatchMeters bounds how far a passenger's destination may be from
-// the driver's destination for the driver-initiated match to fire. NULL on
-// active_passengers.destination_lat means the passenger has not declared a
-// destination yet — they fall back to the legacy "any corridor match" behavior.
-const destinationMatchMeters = 1500
+// Matching thresholds now live in config.C (Match*), populated from env with
+// defaults — see config/config.go. The former file-level consts
+// (maxWalkM / earlyNotifyRadiusM / destinationMatchMeters / relaxed*) were
+// replaced by the ETA-window + same-way rules in FindPassengersInCorridor.
 
-// Ride-sharing tunables. earlyNotifyRadiusM caps how far ahead of the driver
-// (measured along the route) a passenger may be and still get notified. The
-// goal is "driver is approaching" notice — not "anywhere in the corridor".
-// maxWalkM caps how far the passenger is willing to walk to the pickup point
-// on the road; if it's further than this the match is dropped. The ahead
-// tolerance keeps a driver standing exactly at the projection point from
-// fluttering between matched/unmatched.
-const (
-	earlyNotifyRadiusM     = 2000
-	maxWalkM               = 1000
-	aheadToleranceFraction = 0.01
-)
-
-// Relaxed bounds — applied only when the passenger's declared destination is
-// within destinationMatchMeters of the driver's destination. Real users think
-// "we're going the same way" and are willing to walk farther / wait longer
-// for that, so we widen the walk + ahead caps when destinations match. See
-// FindPassengersInCorridor for the disjunctive WHERE.
-const (
-	relaxedMaxWalkM           = 5000
-	relaxedEarlyNotifyRadiusM = 10000
-)
-
-// CorridorMatch is the result row of the heading-aware corridor query: the
-// matched passenger, the suggested pickup point on the driver's road, and the
-// two distances the UI needs to render walk/drive ETAs. MatchKind tags which
-// branch of the disjunctive WHERE fired (see FindPassengersInCorridor).
+// CorridorMatch is the result row of the same-way corridor query: the matched
+// passenger, the pickup point projected onto the driver's road, and the metrics
+// the UI + ranker need. MatchKind is "corridor" (passenger declared a
+// destination that projects forward onto the route) or "corridor_weak" (no
+// destination declared — pickup-only confidence).
 type CorridorMatch struct {
 	User            models.User
 	PickupLat       float64
 	PickupLng       float64
-	WalkM           float64
-	DriverToPickupM float64
-	MatchKind       string // "corridor" | "destination_anchored"
+	WalkM           float64 // off-route walk to the pickup (walk-in)
+	DriverToPickupM float64 // along-route distance driver → pickup (signed; >0 ahead)
+	EtaPickupS      float64 // driver's travel time to the pickup, seconds
+	CarryM          float64 // on-route distance carried (pickup → dropoff); 0 if no dest
+	WalkOutM        float64 // off-route walk from dropoff to destination; 0 if no dest
+	MatchKind       string  // "corridor" | "corridor_weak"
 }
 
-func UpsertActiveDriver(driverID, routeWKT string, originLat, originLng, destLat, destLng, corridorKm float64, seats int) error {
+// UpsertActiveDriver stores/refreshes the driver's active route. routeMEWKT is
+// the measured `LINESTRING M` (M = cumulative seconds) from
+// BuildMeasuredLineEWKT; pass "" to store NULL (matching then can't ETA-gate
+// that driver). current_location is seeded to origin with a fresh timestamp so
+// a just-set route reads as "driver at the start, now".
+func UpsertActiveDriver(driverID, routeWKT, routeMEWKT string, originLat, originLng, destLat, destLng, corridorKm float64, seats int) error {
 	_, err := db.DB.Exec(context.Background(), `
-		INSERT INTO active_drivers (driver_id, origin, destination, route, current_location, corridor_km, seats, status)
+		INSERT INTO active_drivers (driver_id, origin, destination, route, route_m, current_location, current_location_at, corridor_km, seats, status)
 		VALUES (
 			$1,
 			ST_MakePoint($3, $2)::geography,
 			ST_MakePoint($5, $4)::geography,
 			ST_GeogFromText($6),
+			CASE WHEN $7 = '' THEN NULL ELSE ST_GeomFromEWKT($7) END,
 			ST_MakePoint($3, $2)::geography,
-			$7, $8, 'looking'
+			NOW(),
+			$8, $9, 'looking'
 		)
 		ON CONFLICT (driver_id) DO UPDATE SET
-			origin           = EXCLUDED.origin,
-			destination      = EXCLUDED.destination,
-			route            = EXCLUDED.route,
-			current_location = EXCLUDED.origin,
-			corridor_km      = EXCLUDED.corridor_km,
-			seats            = EXCLUDED.seats,
-			seats_taken      = 0,
-			status           = 'looking',
-			created_at       = NOW()
-	`, driverID, originLat, originLng, destLat, destLng, routeWKT, corridorKm, seats)
+			origin              = EXCLUDED.origin,
+			destination         = EXCLUDED.destination,
+			route               = EXCLUDED.route,
+			route_m             = EXCLUDED.route_m,
+			current_location    = EXCLUDED.origin,
+			current_location_at = NOW(),
+			corridor_km         = EXCLUDED.corridor_km,
+			seats               = EXCLUDED.seats,
+			seats_taken         = 0,
+			status              = 'looking',
+			created_at          = NOW()
+	`, driverID, originLat, originLng, destLat, destLng, routeWKT, routeMEWKT, corridorKm, seats)
 	return err
 }
 
-// FindPassengersInCorridor matches passengers who are (a) AHEAD of the
-// driver's current position along the route and (b) satisfy one of two
-// inclusion rules:
+// FindPassengersInCorridor finds passengers the driver can pick up without
+// detouring. The carpool invariant: pickup and dropoff must both reduce to
+// FORWARD points on the driver's existing route (driver_frac < pickup_frac <
+// dropoff_frac), the off-route ends are short walks, and the on-route carry is
+// long enough to be worth a stop.
 //
-//   - Strict corridor: walk < maxWalkM (1 km), ahead < earlyNotifyRadiusM
-//     (2 km), and either no declared destination or destinations match.
-//   - Destination-anchored relaxed: declared destination is within
-//     destinationMatchMeters (1.5 km) of the driver's, walk < relaxedMaxWalkM
-//     (5 km), ahead < relaxedEarlyNotifyRadiusM (10 km).
+// Gating (all tunables from config.C):
+//   - Driver must have a FRESH current_location (no origin fallback) and a
+//     measured route line (route_m) for ETA.
+//   - ETA window: MatchEtaMinS ≤ drive-time(driver→pickup) ≤ MatchEtaMaxS.
+//     The lower bound kills "about to pass / just passed"; the upper bound
+//     defers premature notify (re-run as the driver approaches).
+//   - Flat MatchMinAheadM along-route buffer (replaces the old route-length
+//     fraction).
+//   - Walk-in < cap (MatchWalkCapM, or MatchWalkLongM when the passenger
+//     opted into longer walks).
+//   - Same-way (when a destination is declared): dropoff projects FORWARD of
+//     the pickup, the dropoff is genuinely on-route (off-route < corridor),
+//     combined walk under cap, carry ≥ MatchMinCarryCityM, and a coupling
+//     guard carry ≥ MatchCarryK·(walk_in+walk_out) so a long walk can't eat a
+//     short carry.
+//   - No destination → "corridor_weak": pickup-only confidence (ETA + ahead +
+//     walk), no carry guarantee.
 //
-// Real users care about "we're going the same way," not corridor radius — so
-// when destinations match we let geometry stretch. The match_kind column
-// surfaces which branch fired so the Flutter UI can render a "long walk"
-// banner for the relaxed path.
-//
-// The CTE pre-filters with the larger of the two radii so PostGIS gets a
-// single bounding ST_DWithin and the disjunction in the outer WHERE refines.
+// Note (Phase 2): bearing/heading reject, the city/fast carry split by OSM
+// road class, and the route-endpoint cases (ride-to-end #7, walk-to-start #12)
+// are added once road-class + bearing land. routeWKT is used for the bounding
+// pre-filter; destLat/destLng are retained for signature stability and are no
+// longer part of the predicate (the same-way test uses the passenger's own
+// declared destination).
 func FindPassengersInCorridor(driverID, routeWKT string, corridorKm, destLat, destLng float64, limit int) ([]CorridorMatch, error) {
+	corridorM := corridorKm * 1000
 	rows, err := db.DB.Query(context.Background(), `
-		WITH route_info AS (
+		WITH ri AS (
 			SELECT ad.route::geometry AS route_geom,
-			       ST_Length(ad.route) AS route_len_m,
-			       ST_LineLocatePoint(
-			           ad.route::geometry,
-			           COALESCE(ad.current_location, ad.origin)::geometry
-			       ) AS driver_frac
+			       ad.route_m          AS route_m,
+			       ST_Length(ad.route) AS len_m,
+			       ST_LineLocatePoint(ad.route::geometry, ad.current_location::geometry) AS dfrac,
+			       ST_InterpolatePoint(ad.route_m, ad.current_location::geometry)        AS dt
 			FROM active_drivers ad
 			WHERE ad.driver_id = $1
+			  AND ad.current_location IS NOT NULL
+			  AND ad.route_m IS NOT NULL
+			  AND ad.current_location_at > NOW() - make_interval(secs => $4::float8)
 		),
-		candidates AS (
-			SELECT u.id, u.name, COALESCE(u.fcm_token, '') AS fcm_token,
-			       ap.destination_lat,
+		c AS (
+			SELECT u.id, u.name, COALESCE(u.fcm_token,'') AS fcm_token,
 			       ap.location AS pax_loc,
-			       ST_LineLocatePoint(ri.route_geom, ap.location::geometry) AS pax_frac,
+			       COALESCE(ap.allow_long_walk, false) AS long_walk,
+			       ri.route_geom, ri.route_m, ri.len_m, ri.dfrac, ri.dt,
+			       ST_LineLocatePoint(ri.route_geom, ap.location::geometry)        AS pickup_frac,
 			       ST_ClosestPoint(ri.route_geom, ap.location::geometry)::geography AS pickup_geog,
-			       ri.route_len_m, ri.driver_frac,
-			       (
-			           ap.destination_lat IS NOT NULL
-			           AND ST_DWithin(
-			               ST_SetSRID(ST_MakePoint(ap.destination_lng, ap.destination_lat), 4326)::geography,
-			               ST_SetSRID(ST_MakePoint($5, $4), 4326)::geography,
-			               $6
-			           )
-			       ) AS dest_match
+			       d.geom AS dest_geom,
+			       CASE WHEN d.geom IS NOT NULL
+			            THEN ST_LineLocatePoint(ri.route_geom, d.geom) END AS dropoff_frac,
+			       CASE WHEN d.geom IS NOT NULL
+			            THEN ST_Distance(d.geom::geography,
+			                   ST_ClosestPoint(ri.route_geom, d.geom)::geography) END AS dropoff_off_m
 			FROM active_passengers ap
 			JOIN users u ON u.id = ap.passenger_id
-			CROSS JOIN route_info ri
-			WHERE ST_DWithin(
-				ap.location::geography,
-				ST_GeogFromText($2),
-				GREATEST($3 * 1000, $11)
-			)
-			AND ap.updated_at > NOW() - INTERVAL '10 minutes'
-			AND NOT EXISTS (
-				SELECT 1 FROM ride_requests rr
-				WHERE rr.passenger_id = u.id
-				  AND rr.status IN ('pending','accepted')
-			)
+			CROSS JOIN ri
+			LEFT JOIN LATERAL (
+			    SELECT ST_SetSRID(ST_MakePoint(ap.destination_lng, ap.destination_lat), 4326) AS geom
+			    WHERE ap.destination_lat IS NOT NULL
+			) d ON TRUE
+			WHERE ST_DWithin(ap.location::geography, ST_GeogFromText($2), GREATEST($3::float8, $9::float8))
+			  AND ap.updated_at > NOW() - INTERVAL '10 minutes'
+			  AND NOT EXISTS (
+			      SELECT 1 FROM ride_requests rr
+			      WHERE rr.passenger_id = u.id
+			        AND rr.status IN ('pending','accepted','in_progress')
+			  )
 		),
-		scored AS (
+		s AS (
 			SELECT *,
-			       ST_Distance(pax_loc, pickup_geog) AS walk_m,
-			       (pax_frac - driver_frac) * route_len_m AS driver_to_pickup_m
-			FROM candidates
+			       ST_Distance(pax_loc, pickup_geog)                       AS walk_in_m,
+			       (pickup_frac - dfrac) * len_m                           AS driver_to_pickup_m,
+			       ST_InterpolatePoint(route_m, pickup_geog::geometry) - dt AS eta_pickup_s,
+			       CASE WHEN dropoff_frac IS NOT NULL
+			            THEN (dropoff_frac - pickup_frac) * len_m END      AS carry_m
+			FROM c
 		)
 		SELECT id, name, fcm_token,
 		       ST_Y(pickup_geog::geometry), ST_X(pickup_geog::geometry),
-		       walk_m,
+		       walk_in_m,
 		       driver_to_pickup_m,
-		       CASE
-		           WHEN dest_match AND (walk_m >= $8 OR driver_to_pickup_m >= $9)
-		           THEN 'destination_anchored'
-		           ELSE 'corridor'
-		       END AS match_kind
-		FROM scored
-		WHERE pax_frac > driver_frac + $7
+		       eta_pickup_s,
+		       COALESCE(carry_m, 0),
+		       COALESCE(dropoff_off_m, 0),
+		       CASE WHEN dropoff_frac IS NULL THEN 'corridor_weak' ELSE 'corridor' END AS match_kind
+		FROM s
+		WHERE pickup_frac > dfrac
+		  AND driver_to_pickup_m >= $5::float8
+		  AND eta_pickup_s BETWEEN $6::float8 AND $7::float8
+		  AND walk_in_m < (CASE WHEN long_walk THEN $9::float8 ELSE $8::float8 END)
 		  AND (
-		      -- Strict corridor branch
-		      (
-		          walk_m < $3 * 1000
-		          AND walk_m < $8
-		          AND driver_to_pickup_m < $9
-		          AND (destination_lat IS NULL OR dest_match)
-		      )
-		      OR
-		      -- Destination-anchored relaxed branch
-		      (
-		          dest_match
-		          AND walk_m < $11
-		          AND driver_to_pickup_m < $12
-		      )
+		        dropoff_frac IS NULL
+		        OR (
+		             dropoff_frac > pickup_frac
+		             AND dropoff_off_m < $3::float8
+		             AND (walk_in_m + COALESCE(dropoff_off_m, 0)) < (CASE WHEN long_walk THEN $9::float8 ELSE $8::float8 END)
+		             AND carry_m >= $10::float8
+		             AND carry_m >= $11::float8 * (walk_in_m + COALESCE(dropoff_off_m, 0))
+		        )
 		  )
-		ORDER BY driver_to_pickup_m ASC
-		LIMIT $10
+		ORDER BY eta_pickup_s ASC
+		LIMIT $12
 	`,
-		driverID, routeWKT, corridorKm,
-		destLat, destLng, float64(destinationMatchMeters),
-		aheadToleranceFraction, float64(maxWalkM), float64(earlyNotifyRadiusM),
-		limit,
-		float64(relaxedMaxWalkM), float64(relaxedEarlyNotifyRadiusM),
+		driverID,                 // $1
+		routeWKT,                 // $2  (bounding pre-filter)
+		corridorM,                // $3  on-route dropoff tolerance
+		config.C.MatchLocFreshS,  // $4
+		config.C.MatchMinAheadM,  // $5
+		config.C.MatchEtaMinS,    // $6
+		config.C.MatchEtaMaxS,    // $7
+		config.C.MatchWalkCapM,   // $8
+		config.C.MatchWalkLongM,  // $9
+		config.C.MatchMinCarryCityM, // $10
+		config.C.MatchCarryK,     // $11
+		limit,                    // $12
 	)
 	if err != nil {
 		return nil, fmt.Errorf("corridor query: %w", err)
@@ -189,7 +199,8 @@ func FindPassengersInCorridor(driverID, routeWKT string, corridorKm, destLat, de
 		if err := rows.Scan(
 			&m.User.ID, &m.User.Name, &m.User.FCMToken,
 			&m.PickupLat, &m.PickupLng,
-			&m.WalkM, &m.DriverToPickupM,
+			&m.WalkM, &m.DriverToPickupM, &m.EtaPickupS,
+			&m.CarryM, &m.WalkOutM,
 			&m.MatchKind,
 		); err != nil {
 			return nil, err

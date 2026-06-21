@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Pavelbotsu/sameway_backend/config"
 	"github.com/Pavelbotsu/sameway_backend/db"
 	"github.com/Pavelbotsu/sameway_backend/services"
 	"github.com/gin-gonic/gin"
@@ -124,6 +125,19 @@ func respondAccept(c *gin.Context, passengerID, requestID string) {
 		return
 	}
 	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+
+	// 1b) Re-validate position: the driver may have driven past the pickup
+	// between match and accept. If they provably have (fresh location, pickup
+	// now behind), expire the row and free the slot instead of reserving a seat
+	// for a ride that can't happen.
+	if aheadM, ok := pickupStillAhead(ctx, tx, requestID); ok && aheadM < config.C.MatchMinAheadM {
+		if expirePassedRide(ctx, tx, requestID, passengerID) {
+			c.JSON(http.StatusConflict, gin.H{"error": "driver already passed the pickup"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
@@ -352,13 +366,49 @@ func RequestDriver(c *gin.Context) {
 		return
 	}
 
-	var pickupLat, pickupLng float64
-	err := db.DB.QueryRow(context.Background(), `
+	ctx := c.Request.Context()
+
+	var paxLat, paxLng float64
+	if err := db.DB.QueryRow(ctx, `
 		SELECT ST_Y(location::geometry), ST_X(location::geometry)
 		FROM active_passengers WHERE passenger_id = $1`, passengerID,
-	).Scan(&pickupLat, &pickupLng)
-	if err != nil {
+	).Scan(&paxLat, &paxLng); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "update your location first"})
+		return
+	}
+
+	// No-detour invariant: the pickup is the passenger PROJECTED ONTO the
+	// driver's route, never their raw location. Reject if that projection is
+	// too far to walk to, or already behind the driver.
+	var pickupLat, pickupLng, walkM, aheadM float64
+	err := db.DB.QueryRow(ctx, `
+		SELECT ST_Y(p.geom::geometry), ST_X(p.geom::geometry),
+		       ST_Distance(ap.location, p.geom),
+		       (
+		           ST_LineLocatePoint(ad.route::geometry, ap.location::geometry)
+		         - ST_LineLocatePoint(ad.route::geometry, COALESCE(ad.current_location, ad.origin)::geometry)
+		       ) * ST_Length(ad.route)
+		FROM active_passengers ap
+		JOIN active_drivers ad ON ad.driver_id = $2
+		CROSS JOIN LATERAL (
+		    SELECT ST_ClosestPoint(ad.route::geometry, ap.location::geometry)::geography AS geom
+		) p
+		WHERE ap.passenger_id = $1 AND ad.route IS NOT NULL
+	`, passengerID, req.DriverID).Scan(&pickupLat, &pickupLng, &walkM, &aheadM)
+	if errors.Is(err, pgx.ErrNoRows) {
+		c.JSON(http.StatusConflict, gin.H{"error": "driver is not available"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	if walkM > config.C.MatchWalkLongM {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "you're too far from the driver's route"})
+		return
+	}
+	if aheadM < config.C.MatchMinAheadM {
+		c.JSON(http.StatusConflict, gin.H{"error": "the driver has already passed you"})
 		return
 	}
 
@@ -464,9 +514,10 @@ func PassengerCancelRide(c *gin.Context) {
 // FindPassengersInCorridor so only drivers actually heading that way notify.
 func PassengerSearch(c *gin.Context) {
 	var req struct {
-		DestLat  float64 `json:"dest_lat" binding:"required"`
-		DestLng  float64 `json:"dest_lng" binding:"required"`
-		PreferAI bool    `json:"prefer_ai"` // accepted but unused in Phase 1
+		DestLat       float64 `json:"dest_lat" binding:"required"`
+		DestLng       float64 `json:"dest_lng" binding:"required"`
+		PreferAI      bool    `json:"prefer_ai"`        // accepted but unused in Phase 1
+		AllowLongWalk bool    `json:"allow_long_walk"`  // opt in to a longer walk-to-pickup
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -486,9 +537,10 @@ func PassengerSearch(c *gin.Context) {
 
 	if _, err := db.DB.Exec(ctx, `
 		UPDATE active_passengers
-		SET destination_lat = $1, destination_lng = $2, updated_at = NOW()
-		WHERE passenger_id = $3
-	`, req.DestLat, req.DestLng, passengerID); err != nil {
+		SET destination_lat = $1, destination_lng = $2,
+		    allow_long_walk = $3, updated_at = NOW()
+		WHERE passenger_id = $4
+	`, req.DestLat, req.DestLng, req.AllowLongWalk, passengerID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}

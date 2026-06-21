@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/Pavelbotsu/sameway_backend/handlers"
 	"github.com/Pavelbotsu/sameway_backend/services"
 	"github.com/Pavelbotsu/sameway_backend/testutil"
 	"github.com/stretchr/testify/assert"
@@ -35,8 +36,8 @@ func TestSetRoute_NotifiesPassengerAhead(t *testing.T) {
 	_, tok := testutil.CreateUser(t, pool, "driver", "d1")
 	passengerID, _ := testutil.CreateUser(t, pool, "passenger", "p1")
 	testutil.CreateActivePassenger(t, pool, passengerID,
-		// 700 m ahead along the route
-		testutil.LatLng{Lat: 50.0, Lng: 20.01}, nil)
+		// ~1.4 km ahead along the route — inside the ETA window
+		testutil.LatLng{Lat: 50.0, Lng: 20.02}, nil)
 	testutil.SwapRouter(t, &testutil.MockOSRM{})
 
 	w := testutil.PostJSON(t, r, "/driver/route", tok, map[string]any{
@@ -129,7 +130,9 @@ func TestDriverRespondToRide_AcceptReservesSeat(t *testing.T) {
 		testutil.LatLng{Lat: 50, Lng: 20.1},
 		testutil.LineStringWKT([2]float64{20, 50}, [2]float64{20.1, 50}),
 	)
-	reqID, _, err := services.CreateRideRequest(driverID, passengerID, 50, 20)
+	// Pickup ~1.4 km ahead so the accept-time re-validation (driver hasn't
+	// passed) succeeds; the driver's seeded current_location is the origin.
+	reqID, _, err := services.CreateRideRequest(driverID, passengerID, 50, 20.02)
 	require.NoError(t, err)
 
 	w := testutil.PostJSON(t, r, "/driver/respond", tok, map[string]any{
@@ -168,6 +171,61 @@ func TestDriverRespondToRide_Decline(t *testing.T) {
 	require.NoError(t, pool.QueryRow(ctx(t),
 		`SELECT status FROM ride_requests WHERE id = $1`, reqID).Scan(&status))
 	assert.Equal(t, "declined", status)
+}
+
+// Accept-time re-validation: if the driver has driven past the pickup since the
+// match, accepting must NOT reserve a seat — the row is expired_passed and the
+// slot frees.
+func TestDriverRespondToRide_RejectsWhenDriverPassed(t *testing.T) {
+	pool, r := setupHandlers(t)
+	driverID, tok := testutil.CreateUser(t, pool, "driver", "d1")
+	passengerID, _ := testutil.CreateUser(t, pool, "passenger", "p1")
+	testutil.CreateActiveDriver(t, pool, driverID,
+		testutil.LatLng{Lat: 50, Lng: 20},
+		testutil.LatLng{Lat: 50, Lng: 20.1},
+		testutil.LineStringWKT([2]float64{20, 50}, [2]float64{20.1, 50}),
+	)
+	// Pickup ~1.4 km along, but the driver is now well past it at ~5.7 km.
+	reqID, _, err := services.CreateRideRequest(driverID, passengerID, 50, 20.02)
+	require.NoError(t, err)
+	testutil.SetDriverCurrentLocation(t, pool, driverID, testutil.LatLng{Lat: 50, Lng: 20.08})
+
+	w := testutil.PostJSON(t, r, "/driver/respond", tok, map[string]any{
+		"request_id": reqID, "status": "accepted",
+	})
+	require.Equal(t, http.StatusConflict, w.Code)
+
+	var status string
+	var seatsTaken int
+	require.NoError(t, pool.QueryRow(ctx(t),
+		`SELECT status FROM ride_requests WHERE id = $1`, reqID).Scan(&status))
+	require.NoError(t, pool.QueryRow(ctx(t),
+		`SELECT seats_taken FROM active_drivers WHERE driver_id = $1`, driverID).Scan(&seatsTaken))
+	assert.Equal(t, "expired_passed", status)
+	assert.Equal(t, 0, seatsTaken, "no seat reserved for a passed-by ride")
+}
+
+// The reaper proactively expires pending requests whose driver has provably
+// driven past the pickup, freeing the slot before the timeout.
+func TestReaper_ExpiresPassedPickup(t *testing.T) {
+	pool, _ := setupHandlers(t)
+	driverID, _ := testutil.CreateUser(t, pool, "driver", "d-reap")
+	passengerID, _ := testutil.CreateUser(t, pool, "passenger", "p-reap")
+	testutil.CreateActiveDriver(t, pool, driverID,
+		testutil.LatLng{Lat: 50, Lng: 20},
+		testutil.LatLng{Lat: 50, Lng: 20.1},
+		testutil.LineStringWKT([2]float64{20, 50}, [2]float64{20.1, 50}),
+	)
+	reqID, _, err := services.CreateRideRequest(driverID, passengerID, 50, 20.02)
+	require.NoError(t, err)
+	testutil.SetDriverCurrentLocation(t, pool, driverID, testutil.LatLng{Lat: 50, Lng: 20.08})
+
+	handlers.ReapStalePendingOnce(5)
+
+	var status string
+	require.NoError(t, pool.QueryRow(ctx(t),
+		`SELECT status FROM ride_requests WHERE id = $1`, reqID).Scan(&status))
+	assert.Equal(t, "expired_passed", status)
 }
 
 // ── /driver/route DELETE ───────────────────────────────────────────────────

@@ -39,38 +39,63 @@ func CreateUser(t testing.TB, pool *pgxpool.Pool, role, name string) (id, token 
 // default to 3, corridor to 1 km — override with raw SQL if needed.
 func CreateActiveDriver(t testing.TB, pool *pgxpool.Pool, driverID string, origin, dest LatLng, routeWKT string) {
 	t.Helper()
+	// route_m is the measured line (M = cumulative seconds) the ETA gate needs.
+	// Tests don't carry OSRM per-segment durations, so we synthesize a constant
+	// ~30 km/h (8.3333 m/s) profile via ST_AddMeasure: total seconds =
+	// length_m / 8.3333, distributed linearly by length. current_location_at is
+	// stamped NOW() so the driver reads as a fresh fix at the origin.
 	_, err := pool.Exec(context.Background(), `
 		INSERT INTO active_drivers (
-			driver_id, origin, destination, route, current_location,
-			corridor_km, seats, status
+			driver_id, origin, destination, route, route_m,
+			current_location, current_location_at, corridor_km, seats, status
 		)
 		VALUES (
 			$1,
 			ST_MakePoint($3, $2)::geography,
 			ST_MakePoint($5, $4)::geography,
 			ST_GeogFromText($6),
+			ST_AddMeasure(ST_GeogFromText($6)::geometry, 0, ST_Length(ST_GeogFromText($6)) / 8.3333),
 			ST_MakePoint($3, $2)::geography,
+			NOW(),
 			1.0, 3, 'looking'
 		)
 		ON CONFLICT (driver_id) DO UPDATE SET
-			origin           = EXCLUDED.origin,
-			destination      = EXCLUDED.destination,
-			route            = EXCLUDED.route,
-			current_location = EXCLUDED.origin,
-			status           = 'looking',
-			seats_taken      = 0,
-			created_at       = NOW()
+			origin              = EXCLUDED.origin,
+			destination         = EXCLUDED.destination,
+			route               = EXCLUDED.route,
+			route_m             = EXCLUDED.route_m,
+			current_location    = EXCLUDED.origin,
+			current_location_at = NOW(),
+			status              = 'looking',
+			seats_taken         = 0,
+			created_at          = NOW()
 	`, driverID, origin.Lat, origin.Lng, dest.Lat, dest.Lng, routeWKT)
 	require.NoError(t, err)
 }
 
-// SetDriverCurrentLocation updates active_drivers.current_location only —
-// useful for heading-filter tests that move the driver along the route.
+// SetDriverCurrentLocation moves active_drivers.current_location and refreshes
+// current_location_at — useful for heading/passed-by tests that drive the
+// driver along (or past) the route.
 func SetDriverCurrentLocation(t testing.TB, pool *pgxpool.Pool, driverID string, loc LatLng) {
 	t.Helper()
 	_, err := pool.Exec(context.Background(), `
 		UPDATE active_drivers
-		SET current_location = ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography
+		SET current_location = ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography,
+		    current_location_at = NOW()
+		WHERE driver_id = $3
+	`, loc.Lng, loc.Lat, driverID)
+	require.NoError(t, err)
+}
+
+// SetDriverLocationStale moves current_location but back-dates the timestamp so
+// freshness-gated logic (corridor match, accept re-validation) treats it as
+// unknown.
+func SetDriverLocationStale(t testing.TB, pool *pgxpool.Pool, driverID string, loc LatLng) {
+	t.Helper()
+	_, err := pool.Exec(context.Background(), `
+		UPDATE active_drivers
+		SET current_location = ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography,
+		    current_location_at = NOW() - INTERVAL '1 hour'
 		WHERE driver_id = $3
 	`, loc.Lng, loc.Lat, driverID)
 	require.NoError(t, err)

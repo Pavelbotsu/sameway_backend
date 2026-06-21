@@ -94,8 +94,15 @@ func TestRequestDriver_HappyPath(t *testing.T) {
 	pool, r := setupHandlers(t)
 	driverID, _ := testutil.CreateUser(t, pool, "driver", "d1")
 	passengerID, tok := testutil.CreateUser(t, pool, "passenger", "p1")
+	// Mechanism B projects the pickup onto the driver's route, so the driver
+	// must have one. Passenger sits ~55 m off and ~1.4 km ahead of the origin.
+	testutil.CreateActiveDriver(t, pool, driverID,
+		testutil.LatLng{Lat: 50, Lng: 20},
+		testutil.LatLng{Lat: 50, Lng: 20.1},
+		testutil.LineStringWKT([2]float64{20, 50}, [2]float64{20.1, 50}),
+	)
 	testutil.CreateActivePassenger(t, pool, passengerID,
-		testutil.LatLng{Lat: 50, Lng: 20}, nil)
+		testutil.LatLng{Lat: 50.0005, Lng: 20.02}, nil)
 
 	w := testutil.PostJSON(t, r, "/passenger/request-driver", tok, map[string]any{
 		"driver_id": driverID,
@@ -118,8 +125,13 @@ func TestRequestDriver_IdempotentOnExistingRow(t *testing.T) {
 	pool, r := setupHandlers(t)
 	driverID, _ := testutil.CreateUser(t, pool, "driver", "d1")
 	passengerID, tok := testutil.CreateUser(t, pool, "passenger", "p1")
+	testutil.CreateActiveDriver(t, pool, driverID,
+		testutil.LatLng{Lat: 50, Lng: 20},
+		testutil.LatLng{Lat: 50, Lng: 20.1},
+		testutil.LineStringWKT([2]float64{20, 50}, [2]float64{20.1, 50}),
+	)
 	testutil.CreateActivePassenger(t, pool, passengerID,
-		testutil.LatLng{Lat: 50, Lng: 20}, nil)
+		testutil.LatLng{Lat: 50.0005, Lng: 20.02}, nil)
 
 	// Driver opens a WS connection so we can assert NO duplicate event arrives.
 	wsBase := testutil.ServeWS(t, r)

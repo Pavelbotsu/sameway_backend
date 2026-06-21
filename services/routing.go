@@ -13,6 +13,27 @@ type RouteResult struct {
 	WKT        string
 	Coords     [][2]float64
 	DistanceKm float64
+	// Durations holds OSRM's per-segment travel time in seconds, aligned with
+	// Coords: Durations[i] is the time from Coords[i] to Coords[i+1], so
+	// len(Durations) == len(Coords)-1. Empty when the OSRM deployment doesn't
+	// return duration annotations. Used to build the measured route line for
+	// ETA-to-pickup interpolation (see CumulativeDurations / matching).
+	Durations []float64
+	// DurationS is the total route travel time in seconds (sum of Durations,
+	// or OSRM's route-level duration when annotations are absent).
+	DurationS float64
+}
+
+// CumulativeDurations turns per-segment seconds into cumulative seconds per
+// vertex: returns a slice of len(segments)+1 where out[0]=0 and out[i] is the
+// total time from the start to vertex i. Used to build the LINESTRING M whose
+// M dimension carries travel time.
+func CumulativeDurations(segments []float64) []float64 {
+	out := make([]float64, len(segments)+1)
+	for i, s := range segments {
+		out[i+1] = out[i] + s
+	}
+	return out
 }
 
 // RoutingClient abstracts road-route lookups so tests can swap a mock without
@@ -62,8 +83,12 @@ func (c *OSRMClient) GetRoute(profile string, originLat, originLng, destLat, des
 	if profile == "" {
 		profile = "driving"
 	}
+	// annotations=duration returns per-segment travel times aligned with the
+	// full geometry, which we interpolate into ETA-to-pickup without per-
+	// candidate OSRM calls. Harmless on deployments that ignore it (the field
+	// just comes back empty and callers fall back to route-level duration).
 	url := fmt.Sprintf(
-		"%s/route/v1/%s/%f,%f;%f,%f?overview=full&geometries=geojson",
+		"%s/route/v1/%s/%f,%f;%f,%f?overview=full&geometries=geojson&annotations=duration",
 		c.baseURL(), profile, originLng, originLat, destLng, destLat,
 	)
 
@@ -76,9 +101,15 @@ func (c *OSRMClient) GetRoute(profile string, originLat, originLng, destLat, des
 	var osrm struct {
 		Routes []struct {
 			Distance float64 `json:"distance"`
+			Duration float64 `json:"duration"`
 			Geometry struct {
 				Coordinates [][2]float64 `json:"coordinates"`
 			} `json:"geometry"`
+			Legs []struct {
+				Annotation struct {
+					Duration []float64 `json:"duration"`
+				} `json:"annotation"`
+			} `json:"legs"`
 		} `json:"routes"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&osrm); err != nil {
@@ -96,10 +127,20 @@ func (c *OSRMClient) GetRoute(profile string, originLat, originLng, destLat, des
 	}
 	wkt := "LINESTRING(" + strings.Join(parts, ", ") + ")"
 
+	// Flatten per-leg duration annotations into one segment array aligned with
+	// the geometry (we only ever request 2 waypoints → 1 leg, but concatenate
+	// defensively).
+	var durations []float64
+	for _, leg := range route.Legs {
+		durations = append(durations, leg.Annotation.Duration...)
+	}
+
 	return &RouteResult{
 		WKT:        wkt,
 		Coords:     coords,
 		DistanceKm: route.Distance / 1000,
+		Durations:  durations,
+		DurationS:  route.Duration,
 	}, nil
 }
 

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Pavelbotsu/sameway_backend/config"
 	"github.com/Pavelbotsu/sameway_backend/db"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
@@ -16,12 +17,20 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
+// loadTestConfig populates config.C with env-or-default values so matching
+// tunables (Match*) aren't the zero value during tests. Production calls
+// config.Load() from main; tests go through the container harness, so we load
+// here. No .env in the test working dir → pure defaults, which is what the
+// matching tests assert against.
+func loadTestConfig() { config.Load() }
+
 // StartPostgres boots a fresh Postgres+PostGIS container, runs the production
 // migration against it, and returns a pool. The container is torn down via
 // t.Cleanup. Intended to be called from a package's TestMain (one container
 // per package, shared across tests, isolated via ResetDB).
 func StartPostgres(t testing.TB) *pgxpool.Pool {
 	t.Helper()
+	loadTestConfig()
 	ctx := context.Background()
 
 	container, err := postgres.Run(ctx,
@@ -81,6 +90,7 @@ func UseDB(t testing.TB, pool *pgxpool.Pool) {
 // it returns the pool plus a teardown function that callers must defer. Panics
 // on any error since TestMain has no way to gracefully fail.
 func MustStartPostgres() (*pgxpool.Pool, func()) {
+	loadTestConfig()
 	ctx := context.Background()
 	container, err := postgres.Run(ctx,
 		"postgis/postgis:15-3.4-alpine",

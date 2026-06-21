@@ -242,4 +242,31 @@ const alterSQL = `
 			expires_at TIMESTAMPTZ NOT NULL,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
+
+		-- ── Matching rework (ETA-window, no-passed-by, same-way) ──────────────
+		-- Freshness timestamp for current_location: lets the corridor match and
+		-- accept re-validation skip drivers with stale/unknown position instead
+		-- of falling back to origin (which made the whole route read as "ahead").
+		ALTER TABLE active_drivers ADD COLUMN IF NOT EXISTS current_location_at TIMESTAMPTZ;
+
+		-- Measured copy of the route: a LINESTRING M whose M value at each
+		-- vertex is the cumulative OSRM travel time in seconds. ST_InterpolatePoint
+		-- then yields drive-ETA to any projected point with no per-candidate OSRM
+		-- call. Plain geometry (not geography) because measures need geometry.
+		ALTER TABLE active_drivers ADD COLUMN IF NOT EXISTS route_m geometry(LineStringM,4326);
+
+		-- Phase 2: per-vertex OSM road class (from OSRM steps) for
+		-- stoppability + city/fast carry split.
+		-- ALTER TABLE active_drivers ADD COLUMN IF NOT EXISTS route_classes TEXT[];
+
+		-- Opt-in longer walk: default matching uses a short walk cap; a
+		-- passenger willing to walk further for a same-direction ride sets this.
+		ALTER TABLE active_passengers ADD COLUMN IF NOT EXISTS allow_long_walk BOOLEAN NOT NULL DEFAULT FALSE;
+
+		-- New terminal status: driver provably passed the pickup before the
+		-- ride went active. Outside the active set in uniq_active_ride_request,
+		-- so it frees the passenger's match slot immediately.
+		ALTER TABLE ride_requests DROP CONSTRAINT IF EXISTS ride_requests_status_check;
+		ALTER TABLE ride_requests ADD CONSTRAINT ride_requests_status_check
+			CHECK (status IN ('pending','accepted','in_progress','done','declined','cancelled','expired_passed'));
 `

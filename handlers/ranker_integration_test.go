@@ -17,7 +17,7 @@ func TestSetRoute_MatchMethodGeometricByDefault(t *testing.T) {
 	_, driverTok := testutil.CreateUser(t, pool, "driver", "d-mm-geo")
 	passengerID, paxTok := testutil.CreateUser(t, pool, "passenger", "p-mm-geo")
 	testutil.CreateActivePassenger(t, pool, passengerID,
-		testutil.LatLng{Lat: 50.0, Lng: 20.01}, nil)
+		testutil.LatLng{Lat: 50.0, Lng: 20.02}, nil)
 	testutil.SwapRouter(t, &testutil.MockOSRM{})
 
 	wsBase := testutil.ServeWS(t, r)
@@ -45,7 +45,7 @@ func TestSetRoute_PreferAIWithoutConfigStaysGeometric(t *testing.T) {
 	_, driverTok := testutil.CreateUser(t, pool, "driver", "d-mm-pref")
 	passengerID, paxTok := testutil.CreateUser(t, pool, "passenger", "p-mm-pref")
 	testutil.CreateActivePassenger(t, pool, passengerID,
-		testutil.LatLng{Lat: 50.0, Lng: 20.01}, nil)
+		testutil.LatLng{Lat: 50.0, Lng: 20.02}, nil)
 	testutil.SwapRouter(t, &testutil.MockOSRM{})
 
 	wsBase := testutil.ServeWS(t, r)
@@ -74,8 +74,11 @@ func TestSetRoute_MatchKindCorridor(t *testing.T) {
 	pool, r := setupHandlers(t)
 	_, driverTok := testutil.CreateUser(t, pool, "driver", "d-mk")
 	passengerID, paxTok := testutil.CreateUser(t, pool, "passenger", "p-mk")
+	// A declared destination that projects forward onto the route (carry ~2.8 km)
+	// is what earns the "corridor" tag; without one it would be "corridor_weak".
+	paxDest := testutil.LatLng{Lat: 50.0, Lng: 20.06}
 	testutil.CreateActivePassenger(t, pool, passengerID,
-		testutil.LatLng{Lat: 50.0, Lng: 20.01}, nil)
+		testutil.LatLng{Lat: 50.0005, Lng: 20.02}, &paxDest)
 	testutil.SwapRouter(t, &testutil.MockOSRM{})
 
 	wsBase := testutil.ServeWS(t, r)

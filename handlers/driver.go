@@ -19,21 +19,36 @@ import (
 
 // Per-driver throttle for the on-location-update corridor re-run. In-process
 // only — single backend instance assumed. Move to Redis if we ever scale out.
+//
+// Throttle is by DISTANCE TRAVELLED, not wall-clock: a 30 s timer is ~830 m of
+// blind spot at 100 km/h. We re-run once the driver has moved ≥ MatchRerunMovedM
+// since the last run (with a small time floor so GPS jitter while parked doesn't
+// spam the matcher).
 var (
-	corridorRerunMu     sync.Mutex
-	corridorRerunLastAt = map[string]time.Time{}
+	corridorRerunMu   sync.Mutex
+	corridorRerunLast = map[string]rerunMark{}
 )
 
-const corridorRerunInterval = 30 * time.Second
+type rerunMark struct {
+	at       time.Time
+	lat, lng float64
+}
 
-func shouldRerunCorridor(driverID string) bool {
+const corridorRerunMinInterval = 5 * time.Second
+
+func shouldRerunCorridor(driverID string, lat, lng float64) bool {
 	corridorRerunMu.Lock()
 	defer corridorRerunMu.Unlock()
 	now := time.Now()
-	if last, ok := corridorRerunLastAt[driverID]; ok && now.Sub(last) < corridorRerunInterval {
-		return false
+	if last, ok := corridorRerunLast[driverID]; ok {
+		if now.Sub(last.at) < corridorRerunMinInterval {
+			return false
+		}
+		if services.HaversineM(last.lat, last.lng, lat, lng) < config.C.MatchRerunMovedM {
+			return false
+		}
 	}
-	corridorRerunLastAt[driverID] = now
+	corridorRerunLast[driverID] = rerunMark{at: now, lat: lat, lng: lng}
 	return true
 }
 
@@ -93,7 +108,8 @@ func SetRoute(c *gin.Context) {
 		return
 	}
 
-	if err := services.UpsertActiveDriver(driverID, route.WKT,
+	routeMEWKT := services.BuildMeasuredLineEWKT(route.Coords, route.Durations)
+	if err := services.UpsertActiveDriver(driverID, route.WKT, routeMEWKT,
 		req.OriginLat, req.OriginLng, req.DestinationLat, req.DestinationLng,
 		req.CorridorKm, req.Seats); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
@@ -321,9 +337,12 @@ func UpdateLocation(c *gin.Context) {
 
 	// Mirror into PostGIS so the heading-aware corridor match can compute
 	// passenger-is-ahead-of-driver. Best-effort — Redis remains the hot path.
+	// current_location_at lets matching/accept distinguish a fresh fix from a
+	// stale one (no more origin fallback making the whole route read as ahead).
 	db.DB.Exec(c.Request.Context(), `
 		UPDATE active_drivers
-		SET current_location = ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography
+		SET current_location = ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography,
+		    current_location_at = NOW()
 		WHERE driver_id = $3
 	`, req.Lng, req.Lat, driverID)
 
@@ -331,7 +350,7 @@ func UpdateLocation(c *gin.Context) {
 	// early-notify range" may become eligible. Re-run the corridor match —
 	// idempotent CreateRideRequest means already-notified passengers are
 	// skipped automatically. Throttled to one run per 30 s per driver.
-	if shouldRerunCorridor(driverID) {
+	if shouldRerunCorridor(driverID, req.Lat, req.Lng) {
 		go rerunCorridorMatch(driverID)
 	}
 
@@ -754,6 +773,18 @@ func driverRespondAccept(c *gin.Context, driverID, requestID string) {
 		return
 	}
 	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+
+	// 1b) Re-validate position before reserving a seat: if the driver has
+	// provably passed the pickup since the match, expire the row and free the
+	// passenger's slot rather than accepting an impossible ride.
+	if aheadM, ok := pickupStillAhead(ctx, tx, requestID); ok && aheadM < config.C.MatchMinAheadM {
+		if expirePassedRide(ctx, tx, requestID, passengerID) {
+			c.JSON(http.StatusConflict, gin.H{"error": "you have already passed this pickup"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}

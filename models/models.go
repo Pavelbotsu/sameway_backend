@@ -15,10 +15,16 @@ const (
 )
 
 const (
-	RequestPending   = "pending"
-	RequestAccepted  = "accepted"
-	RequestDeclined  = "declined"
-	RequestCancelled = "cancelled"
+	RequestPending       = "pending"
+	RequestAccepted      = "accepted"
+	RequestInProgress    = "in_progress"
+	RequestDeclined      = "declined"
+	RequestCancelled     = "cancelled"
+	// RequestExpiredPassed is a terminal status set when the driver has
+	// provably passed the pickup before the ride became active (re-validated
+	// at accept and swept by the reaper). It sits OUTSIDE the active set in
+	// the partial unique index, so it frees the passenger's match slot.
+	RequestExpiredPassed = "expired_passed"
 )
 
 type User struct {

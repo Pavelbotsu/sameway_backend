@@ -33,10 +33,17 @@ func (m *MockOSRM) GetRoute(_ string, originLat, originLng, destLat, destLng flo
 		[2]float64{originLng, originLat},
 		[2]float64{destLng, destLat},
 	)
+	// Realistic single-segment metrics from the actual endpoints so the
+	// measured route line / ETA gates behave like production: distance from
+	// great-circle, duration at ~30 km/h (8.3333 m/s).
+	distM := services.HaversineM(originLat, originLng, destLat, destLng)
+	segS := distM / 8.3333
 	return &services.RouteResult{
 		WKT:        wkt,
 		Coords:     [][2]float64{{originLng, originLat}, {destLng, destLat}},
-		DistanceKm: 1.0,
+		DistanceKm: distM / 1000,
+		Durations:  []float64{segS},
+		DurationS:  segS,
 	}, nil
 }
 

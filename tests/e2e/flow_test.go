@@ -65,9 +65,10 @@ func TestDriverInitiatedFlow(t *testing.T) {
 	_, driverTok := register(t, r, "driver", "d1@x.com")
 	passengerID, paxTok := register(t, r, "passenger", "p1@x.com")
 
-	// Passenger publishes location ~700 m ahead of the driver's origin.
+	// Passenger publishes location ~1.4 km ahead of the driver's origin —
+	// inside the ETA window.
 	w := testutil.PutJSON(t, r, "/passenger/location", paxTok, map[string]any{
-		"lat": 50.0, "lng": 20.01,
+		"lat": 50.0, "lng": 20.02,
 	})
 	require.Equal(t, http.StatusOK, w.Code)
 
@@ -126,17 +127,19 @@ func TestPassengerInitiatedFlow(t *testing.T) {
 	})
 	require.Equal(t, http.StatusOK, w.Code)
 
-	// Passenger publishes location.
+	// Passenger publishes location near & ahead of the route. Mechanism B now
+	// projects the pickup onto the driver's route and rejects requests that are
+	// too far off-route or already behind, so the passenger must be reachable.
 	w = testutil.PutJSON(t, r, "/passenger/location", paxTok, map[string]any{
-		"lat": 50.0, "lng": 19.95, // outside the driver's heading filter on purpose
+		"lat": 50.0005, "lng": 20.02,
 	})
 	require.Equal(t, http.StatusOK, w.Code)
 
 	driverConn := testutil.DialWS(t, wsBase, driverTok)
 	time.Sleep(100 * time.Millisecond)
 
-	// Passenger explicitly requests this driver (the heading-filter doesn't
-	// apply on the passenger-initiated path — it's a direct ask).
+	// Passenger explicitly requests this driver — a direct ask, but still
+	// projected onto the route to preserve the no-detour invariant.
 	w = testutil.PostJSON(t, r, "/passenger/request-driver", paxTok, map[string]any{
 		"driver_id": driverID,
 	})
@@ -265,7 +268,7 @@ func TestPickupHandshakeAndDropoff(t *testing.T) {
 	passengerID, paxTok := register(t, r, "passenger", "hs-p@x.com")
 
 	w := testutil.PutJSON(t, r, "/passenger/location", paxTok, map[string]any{
-		"lat": 50.0, "lng": 20.01,
+		"lat": 50.0, "lng": 20.02,
 	})
 	require.Equal(t, http.StatusOK, w.Code)
 
