@@ -85,18 +85,22 @@ func UpsertActiveDriver(driverID, routeWKT, routeMEWKT string, originLat, origin
 //     opted into longer walks).
 //   - Same-way (when a destination is declared): dropoff projects FORWARD of
 //     the pickup, the dropoff is genuinely on-route (off-route < corridor),
-//     combined walk under cap, carry ≥ MatchMinCarryCityM, and a coupling
+//     combined walk under cap, carry ≥ the road-class minimum (MatchMinCarryCityM,
+//     or MatchMinCarryFastM when the pickup is on a fast road), and a coupling
 //     guard carry ≥ MatchCarryK·(walk_in+walk_out) so a long walk can't eat a
 //     short carry.
 //   - No destination → "corridor_weak": pickup-only confidence (ETA + ahead +
-//     walk), no carry guarantee.
+//     walk), and only on non-fast roads (no flag-downs on a motorway).
 //
-// Note (Phase 2): bearing/heading reject, the city/fast carry split by OSM
-// road class, and the route-endpoint cases (ride-to-end #7, walk-to-start #12)
-// are added once road-class + bearing land. routeWKT is used for the bounding
-// pre-filter; destLat/destLng are retained for signature stability and are no
-// longer part of the predicate (the same-way test uses the passenger's own
-// declared destination).
+// Road class is inferred from the OSRM-implied speed at the pickup (distance/
+// time over a small window of the measured route line) — no external OSM data.
+//
+// Not done here: a heading/carriageway reject (#5) is intentionally omitted —
+// with a single OSRM centerline it can't separate carriageways and a naive
+// tangent-vs-bearing test wrongly drops valid riders on curved routes; it needs
+// real driven geometry. The route-endpoint cases (#7/#12) and forward-reposition
+// (#9) are handled outside this query. routeWKT is the bounding pre-filter;
+// destLat/destLng are retained for signature stability.
 func FindPassengersInCorridor(driverID, routeWKT string, corridorKm, destLat, destLng float64, limit int) ([]CorridorMatch, error) {
 	corridorM := corridorKm * 1000
 	rows, err := db.DB.Query(context.Background(), `
@@ -141,13 +145,23 @@ func FindPassengersInCorridor(driverID, routeWKT string, corridorKm, destLat, de
 			  )
 		),
 		s AS (
-			SELECT *,
+			SELECT c.*,
 			       ST_Distance(pax_loc, pickup_geog)                       AS walk_in_m,
 			       (pickup_frac - dfrac) * len_m                           AS driver_to_pickup_m,
 			       ST_InterpolatePoint(route_m, pickup_geog::geometry) - dt AS eta_pickup_s,
 			       CASE WHEN dropoff_frac IS NOT NULL
-			            THEN (dropoff_frac - pickup_frac) * len_m END      AS carry_m
+			            THEN (dropoff_frac - pickup_frac) * len_m END      AS carry_m,
+			       -- Road class inferred from OSRM-implied speed at the pickup:
+			       -- distance/time over a small window on the measured line.
+			       CASE WHEN (ST_InterpolatePoint(route_m, win.p2) - ST_InterpolatePoint(route_m, win.p1)) > 0
+			            THEN ST_Distance(win.p1::geography, win.p2::geography)
+			                 / (ST_InterpolatePoint(route_m, win.p2) - ST_InterpolatePoint(route_m, win.p1)) * 3.6
+			            ELSE 0 END                                         AS pickup_speed_kmh
 			FROM c
+			CROSS JOIN LATERAL (
+			    SELECT ST_LineInterpolatePoint(route_geom, GREATEST(pickup_frac - 0.005, 0)) AS p1,
+			           ST_LineInterpolatePoint(route_geom, LEAST(pickup_frac + 0.005, 1))    AS p2
+			) win
 		)
 		SELECT id, name, fcm_token,
 		       ST_Y(pickup_geog::geometry), ST_X(pickup_geog::geometry),
@@ -163,30 +177,35 @@ func FindPassengersInCorridor(driverID, routeWKT string, corridorKm, destLat, de
 		  AND eta_pickup_s BETWEEN $6::float8 AND $7::float8
 		  AND walk_in_m < (CASE WHEN long_walk THEN $9::float8 ELSE $8::float8 END)
 		  AND (
-		        dropoff_frac IS NULL
+		        -- Weak (no destination): pickup-only, and never on a fast road
+		        -- (can't be flagged down on a motorway, no carry to justify it).
+		        (dropoff_frac IS NULL AND pickup_speed_kmh < $13::float8)
 		        OR (
 		             dropoff_frac > pickup_frac
 		             AND dropoff_off_m < $3::float8
 		             AND (walk_in_m + COALESCE(dropoff_off_m, 0)) < (CASE WHEN long_walk THEN $9::float8 ELSE $8::float8 END)
-		             AND carry_m >= $10::float8
+		             -- City vs fast-road carry minimum (road class via speed).
+		             AND carry_m >= (CASE WHEN pickup_speed_kmh >= $13::float8 THEN $14::float8 ELSE $10::float8 END)
 		             AND carry_m >= $11::float8 * (walk_in_m + COALESCE(dropoff_off_m, 0))
 		        )
 		  )
 		ORDER BY eta_pickup_s ASC
 		LIMIT $12
 	`,
-		driverID,                 // $1
-		routeWKT,                 // $2  (bounding pre-filter)
-		corridorM,                // $3  on-route dropoff tolerance
-		config.C.MatchLocFreshS,  // $4
-		config.C.MatchMinAheadM,  // $5
-		config.C.MatchEtaMinS,    // $6
-		config.C.MatchEtaMaxS,    // $7
-		config.C.MatchWalkCapM,   // $8
-		config.C.MatchWalkLongM,  // $9
+		driverID,                    // $1
+		routeWKT,                    // $2  (bounding pre-filter)
+		corridorM,                   // $3  on-route dropoff tolerance
+		config.C.MatchLocFreshS,     // $4
+		config.C.MatchMinAheadM,     // $5
+		config.C.MatchEtaMinS,       // $6
+		config.C.MatchEtaMaxS,       // $7
+		config.C.MatchWalkCapM,      // $8
+		config.C.MatchWalkLongM,     // $9
 		config.C.MatchMinCarryCityM, // $10
-		config.C.MatchCarryK,     // $11
-		limit,                    // $12
+		config.C.MatchCarryK,        // $11
+		limit,                       // $12
+		config.C.MatchFastRoadKmh,   // $13
+		config.C.MatchMinCarryFastM, // $14
 	)
 	if err != nil {
 		return nil, fmt.Errorf("corridor query: %w", err)

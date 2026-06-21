@@ -354,16 +354,19 @@ func UpdateLocation(c *gin.Context) {
 		go rerunCorridorMatch(driverID)
 	}
 
-	// Relay to any accepted passenger(s) over WS so the passenger's
-	// _AcceptedCard mini-map sees the live driver position.
+	// Live location: relay to the counterparty passenger(s) of any active ride
+	// (accepted = approaching pickup, in_progress = in the car) so their map
+	// tracks the car. Throttled per ride; only the counterparty receives it;
+	// terminal statuses fall out of this query, so the stream tears down on its
+	// own.
 	rows, err := db.DB.Query(c.Request.Context(), `
 		SELECT id, passenger_id FROM ride_requests
-		WHERE driver_id = $1 AND status = 'accepted'
+		WHERE driver_id = $1 AND status IN ('accepted','in_progress')
 	`, driverID)
 	if err == nil {
 		for rows.Next() {
 			var reqID, passengerID string
-			if rows.Scan(&reqID, &passengerID) == nil {
+			if rows.Scan(&reqID, &passengerID) == nil && shouldRelayLiveLoc(reqID+":d") {
 				Hub.SendToUser(passengerID, "driver_location", gin.H{
 					"request_id": reqID,
 					"lat":        req.Lat,

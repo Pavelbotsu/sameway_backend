@@ -83,6 +83,7 @@ func main() {
 		passenger.POST("/nearby-drivers", handlers.NearbyDrivers)
 		passenger.POST("/search", handlers.PassengerSearch)
 		passenger.POST("/request-driver", handlers.RequestDriver)
+		passenger.POST("/reposition", handlers.RepositionForDriver)
 		passenger.GET("/my-requests", handlers.GetMyRequests)
 		passenger.DELETE("/active", handlers.GoOffline)
 		passenger.DELETE("/ride/:request_id", handlers.PassengerCancelRide)

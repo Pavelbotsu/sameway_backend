@@ -46,7 +46,8 @@ type Config struct {
 	MatchWalkCapM      float64 // default walk-to-pickup cap
 	MatchWalkLongM     float64 // opt-in cap when passenger sets allow_long_walk
 	MatchMinCarryCityM float64 // min carried distance to be worth a stop (city)
-	MatchMinCarryFastM float64 // min carried distance on fast roads (Phase 2)
+	MatchMinCarryFastM float64 // min carried distance on fast roads
+	MatchFastRoadKmh   float64 // OSRM-implied speed at/above which a pickup is "fast road"
 	MatchCarryK        float64 // carry ≥ K·(walk_in+walk_out) coupling
 	MatchMaxBearingDeg float64 // heading reject threshold (Phase 2)
 	MatchLocFreshS     float64 // current_location is "fresh" within this many seconds
@@ -89,6 +90,7 @@ func Load() {
 		MatchWalkLongM:     getEnvFloat("MATCH_WALK_LONG_M", 2000),
 		MatchMinCarryCityM: getEnvFloat("MATCH_MIN_CARRY_CITY_M", 2000),
 		MatchMinCarryFastM: getEnvFloat("MATCH_MIN_CARRY_FAST_M", 15000),
+		MatchFastRoadKmh:   getEnvFloat("MATCH_FAST_ROAD_KMH", 80),
 		MatchCarryK:        getEnvFloat("MATCH_CARRY_K", 4),
 		MatchMaxBearingDeg: getEnvFloat("MATCH_MAX_BEARING_DEG", 60),
 		MatchLocFreshS:     getEnvFloat("MATCH_LOC_FRESH_S", 30),

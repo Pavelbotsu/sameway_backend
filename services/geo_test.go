@@ -307,6 +307,74 @@ func TestFindPassengersInCorridor_StaleLocationSkipped(t *testing.T) {
 	assert.Empty(t, matches, "driver with a stale location must be skipped")
 }
 
+// seedFastRouteDriver builds a ~28.7 km E-W route whose measured line implies
+// ~100 km/h everywhere (a "fast road"). At that speed the ETA window admits
+// pickups projecting between ~lng 20.035 and ~20.232.
+func seedFastRouteDriver(t *testing.T, pool *pgxpool.Pool, driverID string) (dest testutil.LatLng, routeWKT string) {
+	origin := testutil.LatLng{Lat: 50.00, Lng: 20.00}
+	dest = testutil.LatLng{Lat: 50.00, Lng: 20.40}
+	routeWKT = testutil.LineStringWKT([2]float64{20.00, 50.00}, [2]float64{20.40, 50.00})
+	// ~28.7 km at ~100 km/h ≈ 1033 s for the single segment.
+	routeM := services.BuildMeasuredLineEWKT(
+		[][2]float64{{20.00, 50.00}, {20.40, 50.00}}, []float64{1033})
+	testutil.CreateActiveDriverMeasured(t, pool, driverID, origin, dest, routeWKT, routeM)
+	return
+}
+
+// Road class (#8): on a fast road a medium carry that would pass in the city is
+// rejected — it must clear the higher fast-road minimum.
+func TestFindPassengersInCorridor_FastRoadRejectsMediumCarry(t *testing.T) {
+	pool := setup(t)
+	driverID, _ := testutil.CreateUser(t, pool, "driver", "d1")
+	passengerID, _ := testutil.CreateUser(t, pool, "passenger", "p1")
+	dest, routeWKT := seedFastRouteDriver(t, pool, driverID)
+
+	// Pickup ~3.6 km along (eta ~129 s), carry ~7 km: over the 2 km city min,
+	// under the 15 km fast-road min → rejected on a fast road.
+	paxDest := testutil.LatLng{Lat: 50.00, Lng: 20.15}
+	testutil.CreateActivePassenger(t, pool,
+		passengerID, testutil.LatLng{Lat: 50.0005, Lng: 20.05}, &paxDest)
+
+	matches, err := services.FindPassengersInCorridor(driverID, routeWKT, 1.0, dest.Lat, dest.Lng, 10)
+	require.NoError(t, err)
+	assert.Empty(t, matches, "medium carry on a fast road must be rejected")
+}
+
+// Road class (#8): a long carry on the same fast road clears the fast minimum
+// and matches.
+func TestFindPassengersInCorridor_FastRoadLongCarryMatches(t *testing.T) {
+	pool := setup(t)
+	driverID, _ := testutil.CreateUser(t, pool, "driver", "d1")
+	passengerID, _ := testutil.CreateUser(t, pool, "passenger", "p1")
+	dest, routeWKT := seedFastRouteDriver(t, pool, driverID)
+
+	// Pickup ~3.6 km along, dropoff at the route end → carry ~25 km ≥ 15 km.
+	paxDest := testutil.LatLng{Lat: 50.00, Lng: 20.40}
+	testutil.CreateActivePassenger(t, pool,
+		passengerID, testutil.LatLng{Lat: 50.0005, Lng: 20.05}, &paxDest)
+
+	matches, err := services.FindPassengersInCorridor(driverID, routeWKT, 1.0, dest.Lat, dest.Lng, 10)
+	require.NoError(t, err)
+	require.Len(t, matches, 1, "long carry on a fast road should match")
+	assert.Equal(t, "corridor", matches[0].MatchKind)
+}
+
+// Road class (#8): a no-destination (weak) passenger on a fast road is dropped —
+// you can't be flagged down on a motorway.
+func TestFindPassengersInCorridor_FastRoadDropsWeak(t *testing.T) {
+	pool := setup(t)
+	driverID, _ := testutil.CreateUser(t, pool, "driver", "d1")
+	passengerID, _ := testutil.CreateUser(t, pool, "passenger", "p1")
+	dest, routeWKT := seedFastRouteDriver(t, pool, driverID)
+
+	testutil.CreateActivePassenger(t, pool,
+		passengerID, testutil.LatLng{Lat: 50.0005, Lng: 20.05}, nil)
+
+	matches, err := services.FindPassengersInCorridor(driverID, routeWKT, 1.0, dest.Lat, dest.Lng, 10)
+	require.NoError(t, err)
+	assert.Empty(t, matches, "weak match on a fast road must be dropped")
+}
+
 // ── GetNearbyDrivers self-exclusion ─────────────────────────────────────────
 
 func TestGetNearbyDrivers_ExcludesSelf(t *testing.T) {

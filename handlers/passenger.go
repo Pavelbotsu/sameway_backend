@@ -28,16 +28,17 @@ func PassengerUpdateLocation(c *gin.Context) {
 		return
 	}
 
-	// Relay to the matched driver(s) over WS so the driver UI can
-	// render the passenger's live position on the accepted-row mini-map.
+	// Live location: relay to the counterparty driver(s) of any active ride
+	// (accepted/in_progress). Throttled per ride+direction; teardown is implicit
+	// once the ride leaves those statuses.
 	rows, err := db.DB.Query(c.Request.Context(), `
 		SELECT id, driver_id FROM ride_requests
-		WHERE passenger_id = $1 AND status = 'accepted'
+		WHERE passenger_id = $1 AND status IN ('accepted','in_progress')
 	`, passengerID)
 	if err == nil {
 		for rows.Next() {
 			var reqID, driverID string
-			if rows.Scan(&reqID, &driverID) == nil {
+			if rows.Scan(&reqID, &driverID) == nil && shouldRelayLiveLoc(reqID+":p") {
 				Hub.SendToUser(driverID, "passenger_location", gin.H{
 					"request_id": reqID,
 					"lat":        req.Lat,
@@ -580,6 +581,31 @@ func PassengerCancelPendingRequest(c *gin.Context) {
 	})
 
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// RepositionForDriver returns a "walk forward to this point to catch this
+// driver" suggestion for a specific driver, or {"worth":false} when none
+// qualifies. Read-only; the passenger decides whether to act on it. Built on
+// services.RepositionPickup (deterministic — no LLM).
+func RepositionForDriver(c *gin.Context) {
+	var req struct {
+		DriverID string `json:"driver_id" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	passengerID := c.GetString("user_id")
+	res, ok, err := services.RepositionPickup(req.DriverID, passengerID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	if !ok {
+		c.JSON(http.StatusOK, gin.H{"worth": false})
+		return
+	}
+	c.JSON(http.StatusOK, res)
 }
 
 func GoOffline(c *gin.Context) {

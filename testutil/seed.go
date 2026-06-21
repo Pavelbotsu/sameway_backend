@@ -73,6 +73,41 @@ func CreateActiveDriver(t testing.TB, pool *pgxpool.Pool, driverID string, origi
 	require.NoError(t, err)
 }
 
+// CreateActiveDriverMeasured is like CreateActiveDriver but takes an explicit
+// measured route line (route_m EWKT, "SRID=4326;LINESTRING M(...)") so tests can
+// control the per-segment OSRM-implied speed used by the road-class gate. Build
+// the EWKT with services.BuildMeasuredLineEWKT(coords, durations).
+func CreateActiveDriverMeasured(t testing.TB, pool *pgxpool.Pool, driverID string, origin, dest LatLng, routeWKT, routeMEWKT string) {
+	t.Helper()
+	_, err := pool.Exec(context.Background(), `
+		INSERT INTO active_drivers (
+			driver_id, origin, destination, route, route_m,
+			current_location, current_location_at, corridor_km, seats, status
+		)
+		VALUES (
+			$1,
+			ST_MakePoint($3, $2)::geography,
+			ST_MakePoint($5, $4)::geography,
+			ST_GeogFromText($6),
+			ST_GeomFromEWKT($7),
+			ST_MakePoint($3, $2)::geography,
+			NOW(),
+			1.0, 3, 'looking'
+		)
+		ON CONFLICT (driver_id) DO UPDATE SET
+			origin              = EXCLUDED.origin,
+			destination         = EXCLUDED.destination,
+			route               = EXCLUDED.route,
+			route_m             = EXCLUDED.route_m,
+			current_location    = EXCLUDED.origin,
+			current_location_at = NOW(),
+			status              = 'looking',
+			seats_taken         = 0,
+			created_at          = NOW()
+	`, driverID, origin.Lat, origin.Lng, dest.Lat, dest.Lng, routeWKT, routeMEWKT)
+	require.NoError(t, err)
+}
+
 // SetDriverCurrentLocation moves active_drivers.current_location and refreshes
 // current_location_at — useful for heading/passed-by tests that drive the
 // driver along (or past) the route.
