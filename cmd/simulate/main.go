@@ -24,8 +24,8 @@ const wsBase = "ws://localhost:8080"
 const (
 	//latCenter = 50.06465 // Krakow center
 	//lngCenter = 19.94498
-	latCenter = 50.06811 // Krakow center
-	lngCenter = 20.02456
+	latCenter = 49.091339 // Kremenchuk center
+	lngCenter = 33.379375
 	spread    = 0.02 // ~5 km
 )
 
