@@ -14,7 +14,6 @@ Go HTTP + WebSocket API for the Sameway ridesharing app. Drivers set a road rout
 | Database | PostgreSQL 15 + **PostGIS** extension |
 | DB driver | [pgx/v5](https://github.com/jackc/pgx) (raw SQL, no ORM) |
 | Routing engine | [OSRM](https://project-osrm.org/) HTTP API |
-| Cache | Redis (optional — live driver location only) |
 | Push | Firebase FCM (optional in dev) |
 | Auth | JWT ([golang-jwt/v5](https://github.com/golang-jwt/jwt)), bcrypt passwords |
 | Config | `.env` via [godotenv](https://github.com/joho/godotenv) |
@@ -24,7 +23,7 @@ Go HTTP + WebSocket API for the Sameway ridesharing app. Drivers set a road rout
 ## Quick start
 
 ```bash
-# 1. Start PostgreSQL + PostGIS + Redis
+# 1. Start PostgreSQL + PostGIS
 docker compose -f docker/docker-compose.yml up -d
 
 # 2. Configure environment
@@ -51,9 +50,9 @@ To enable FCM in development, drop a `serviceAccountKey.json` next to `main.go` 
 | `DB_USER` | `postgres` | Postgres user |
 | `DB_PASSWORD` | `password` | Postgres password |
 | `DB_NAME` | `rideshare` | Database name |
-| `REDIS_ADDR` | `localhost:6379` | Redis address; unreachable → warning + continue |
-| `REDIS_PASSWORD` | _empty_ | Redis password |
-| `JWT_SECRET` | `change-this` | JWT signing secret — **must change in prod** |
+| `APP_ENV` | `dev` | `prod` refuses to boot on insecure defaults (JWT secret, public OSRM) |
+| `JWT_SECRET` | `change-this` | JWT signing secret — **prod refuses to boot with the default** |
+| `JWT_TTL_HOURS` | `720` | Token lifetime (hours) |
 | `FIREBASE_CREDENTIALS_PATH` | `./serviceAccountKey.json` | Service-account JSON; empty/missing → FCM disabled |
 | `OSRM_BASE_URL` | `http://router.project-osrm.org` | OSRM endpoint |
 | `MAX_CORRIDOR_NOTIFICATIONS` | `20` | Max passengers notified per driver SetRoute fanout |
@@ -126,7 +125,7 @@ All routes prefixed with `/`. JWT in `Authorization: Bearer <token>` header exce
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/route` | OSRM route + corridor query + capped fanout to passengers |
-| `PUT` | `/location` | Live position (Redis cache) |
+| `PUT` | `/location` | Live position (PostGIS `current_location` + WS relay) |
 | `GET` | `/requests` | Pending/accepted/declined requests for this driver |
 | `PUT` | `/status` | `{status, distance_km?}` — on `done` records trips, resets seats |
 | `DELETE` | `/route` | Cancels active route + notifies all affected passengers |
@@ -293,7 +292,7 @@ GIST indexes on `active_drivers.route`, `active_passengers.location`, and the `p
 - **One active route per driver** — `UNIQUE(driver_id)` on `active_drivers` + upsert.
 - **Passenger staleness filter** — `FindPassengersInCorridor` excludes `updated_at < NOW() - 10min`.
 - **Firebase FCM is optional** — `notify.go` guards `if fcmClient == nil`; dev works without credentials.
-- **Redis is optional** — `ConnectRedis` failure logs a warning and continues; used only for live driver location cache.
+- **No Redis** — driver positions live in PostGIS (`active_drivers.current_location`); the former Redis mirror was write-only and has been removed. Note the WS hub and the in-process throttles assume a single backend instance; scaling out requires moving that state to a shared store.
 - **WSHub is a package-level singleton** in `handlers/websocket.go`; shared by all handlers.
 - **Idempotency keys** — clients may send `X-Idempotency-Key` headers on mutating requests; currently passed through unchanged (room for server-side dedupe table later).
 

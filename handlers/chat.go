@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Pavelbotsu/sameway_backend/db"
@@ -22,19 +23,37 @@ func SendMessage(c *gin.Context) {
 	}
 
 	senderID := c.GetString("user_id")
+	req.Content = strings.TrimSpace(req.Content)
+	if req.Content == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "empty message"})
+		return
+	}
+	if len(req.Content) > 2000 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "message too long (max 2000 characters)"})
+		return
+	}
 
-	// Verify sender is part of this ride request
-	var driverID, passengerID string
+	// Verify sender is part of this ride request, and that the engagement is
+	// still live — a declined/cancelled ride must not remain an open message
+	// channel between strangers.
+	var driverID, passengerID, status string
 	err := db.DB.QueryRow(context.Background(),
-		`SELECT driver_id, passenger_id FROM ride_requests WHERE id = $1`,
+		`SELECT driver_id, passenger_id, status FROM ride_requests WHERE id = $1`,
 		req.RideRequestID,
-	).Scan(&driverID, &passengerID)
+	).Scan(&driverID, &passengerID, &status)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "ride request not found"})
 		return
 	}
 	if senderID != driverID && senderID != passengerID {
 		c.JSON(http.StatusForbidden, gin.H{"error": "not part of this ride"})
+		return
+	}
+	switch status {
+	case "offered", "pending", "accepted", "in_progress":
+		// live — chat allowed
+	default:
+		c.JSON(http.StatusConflict, gin.H{"error": "this ride is no longer active"})
 		return
 	}
 
@@ -69,15 +88,13 @@ func SendMessage(c *gin.Context) {
 	// notification. Best-effort: if the recipient has no token or FCM isn't
 	// configured, NotifyChatMessage is a no-op.
 	var recipientToken, senderName string
-	_ = db.DB.QueryRow(context.Background(),
-		`SELECT COALESCE(fcm_token, '') FROM users WHERE id = $1`,
-		recipientID,
-	).Scan(&recipientToken)
-	_ = db.DB.QueryRow(context.Background(),
-		`SELECT COALESCE(name, '') FROM users WHERE id = $1`,
-		senderID,
-	).Scan(&senderName)
-	go services.NotifyChatMessage(recipientToken, senderID, senderName, req.RideRequestID, req.Content)
+	_ = db.DB.QueryRow(context.Background(), `
+		SELECT (SELECT COALESCE(fcm_token, '') FROM users WHERE id = $1),
+		       (SELECT COALESCE(name, '')      FROM users WHERE id = $2)
+	`, recipientID, senderID).Scan(&recipientToken, &senderName)
+	go safeGo("fcm-chat-notify", func() {
+		services.NotifyChatMessage(recipientToken, senderID, senderName, req.RideRequestID, req.Content)
+	})()
 
 	c.JSON(http.StatusOK, msg)
 }

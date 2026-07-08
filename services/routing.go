@@ -1,10 +1,11 @@
-﻿package services
+package services
 
 import (
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Pavelbotsu/sameway_backend/config"
 )
@@ -63,11 +64,16 @@ func (c *OSRMClient) baseURL() string {
 	return config.C.OSRMBaseURL
 }
 
+// osrmDefaultClient bounds every OSRM call. Routing is on the hot path of
+// SetRoute/PassengerSearch/GetPickupRoute — an unbounded http.DefaultClient
+// call would pin handler goroutines for as long as a hung upstream likes.
+var osrmDefaultClient = &http.Client{Timeout: 8 * time.Second}
+
 func (c *OSRMClient) http() *http.Client {
 	if c.HTTP != nil {
 		return c.HTTP
 	}
-	return http.DefaultClient
+	return osrmDefaultClient
 }
 
 func (c *OSRMClient) GetRoadRoute(originLat, originLng, destLat, destLng float64) (*RouteResult, error) {
@@ -97,6 +103,11 @@ func (c *OSRMClient) GetRoute(profile string, originLat, originLng, destLat, des
 		return nil, fmt.Errorf("osrm request: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		// The public demo server rate-limits with non-200s; surfacing the
+		// status beats decoding garbage into "no route found".
+		return nil, fmt.Errorf("osrm http %d", resp.StatusCode)
+	}
 
 	var osrm struct {
 		Routes []struct {

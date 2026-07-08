@@ -19,12 +19,15 @@ import (
 // reject when ahead < MatchMinAheadM and mark the row expired_passed.
 func pickupStillAhead(ctx context.Context, tx pgx.Tx, requestID string) (aheadM float64, ok bool) {
 	err := tx.QueryRow(ctx, `
-		SELECT (
-		    ST_LineLocatePoint(ad.route::geometry, rr.pickup_location::geometry)
-		  - ST_LineLocatePoint(ad.route::geometry, ad.current_location::geometry)
-		) * ST_Length(ad.route)
+		SELECT SIGN(p.pf - p.df) * ST_Length(ST_LineSubstring(
+		           ad.route::geometry, LEAST(p.df, p.pf), GREATEST(p.df, p.pf)
+		       )::geography)
 		FROM ride_requests rr
 		JOIN active_drivers ad ON ad.driver_id = rr.driver_id
+		CROSS JOIN LATERAL (
+		    SELECT ST_LineLocatePoint(ad.route::geometry, rr.pickup_location::geometry)   AS pf,
+		           ST_LineLocatePoint(ad.route::geometry, ad.current_location::geometry) AS df
+		) p
 		WHERE rr.id = $1
 		  AND ad.route IS NOT NULL
 		  AND ad.current_location IS NOT NULL

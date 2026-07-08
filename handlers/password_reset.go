@@ -3,9 +3,11 @@ package handlers
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -19,8 +21,11 @@ import (
 )
 
 const (
-	resetCodeTTL      = 15 * time.Minute
+	resetCodeTTL        = 15 * time.Minute
 	resetResendCooldown = 60 * time.Second
+	// After this many wrong guesses the code is dead — a 6-digit space must
+	// not be brute-forceable within the TTL.
+	resetMaxAttempts = 5
 )
 
 // generateResetCode returns a uniformly-random 6-digit string ("000000" to
@@ -140,14 +145,27 @@ func ResetPassword(c *gin.Context) {
 
 	var storedCode string
 	var expiresAt time.Time
+	var attempts int
 	err := db.DB.QueryRow(ctx,
-		`SELECT code, expires_at FROM password_resets WHERE email = $1`, emailAddr,
-	).Scan(&storedCode, &expiresAt)
+		`SELECT code, expires_at, attempts FROM password_resets WHERE email = $1`, emailAddr,
+	).Scan(&storedCode, &expiresAt, &attempts)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or expired code"})
 		return
 	}
-	if time.Now().After(expiresAt) || storedCode != code {
+	if attempts >= resetMaxAttempts {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many attempts — request a new code"})
+		return
+	}
+	// Constant-time compare; count every failed guess against the cap.
+	codeOK := subtle.ConstantTimeCompare(
+		[]byte(strings.TrimSpace(storedCode)), []byte(code)) == 1
+	if time.Now().After(expiresAt) || !codeOK {
+		if _, uerr := db.DB.Exec(ctx,
+			`UPDATE password_resets SET attempts = attempts + 1 WHERE email = $1`, emailAddr,
+		); uerr != nil {
+			log.Printf("ResetPassword: bump attempts for %s: %v", emailAddr, uerr)
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or expired code"})
 		return
 	}

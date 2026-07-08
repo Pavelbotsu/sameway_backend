@@ -1,4 +1,4 @@
-﻿package handlers
+package handlers
 
 import (
 	"context"
@@ -14,16 +14,23 @@ import (
 )
 
 func PassengerUpdateLocation(c *gin.Context) {
+	// Pointer coords: `required` on plain floats rejects legal zero values
+	// (equator / Greenwich meridian).
 	var req struct {
-		Lat float64 `json:"lat" binding:"required"`
-		Lng float64 `json:"lng" binding:"required"`
+		Lat *float64 `json:"lat" binding:"required"`
+		Lng *float64 `json:"lng" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if !validLatLng(*req.Lat, *req.Lng) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "coordinates out of range"})
+		return
+	}
+	lat, lng := *req.Lat, *req.Lng
 	passengerID := c.GetString("user_id")
-	if err := services.UpsertActivePassenger(passengerID, req.Lat, req.Lng); err != nil {
+	if err := services.UpsertActivePassenger(passengerID, lat, lng); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
@@ -41,8 +48,8 @@ func PassengerUpdateLocation(c *gin.Context) {
 			if rows.Scan(&reqID, &driverID) == nil && shouldRelayLiveLoc(reqID+":p") {
 				Hub.SendToUser(driverID, "passenger_location", gin.H{
 					"request_id": reqID,
-					"lat":        req.Lat,
-					"lng":        req.Lng,
+					"lat":        lat,
+					"lng":        lng,
 				})
 			}
 		}
@@ -73,6 +80,12 @@ func RespondToRide(c *gin.Context) {
 
 func respondDecline(c *gin.Context, passengerID, requestID string) {
 	rideReq, err := services.UpdateRideRequestStatus(requestID, passengerID, "declined")
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Already accepted/finished/cancelled — declining now would bypass
+		// the seat-restoring cancel path.
+		c.JSON(http.StatusConflict, gin.H{"error": "request is no longer declinable — use cancel instead"})
+		return
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
@@ -99,11 +112,12 @@ func respondDecline(c *gin.Context, passengerID, requestID string) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
-type bumpedRequest struct {
-	ID       string
-	DriverID string
-}
-
+// respondAccept handles the PASSENGER accepting a driver-broadcast offer.
+// The offer ('offered') is promoted to 'pending' — awaiting the driver's
+// confirm — and the driver is notified. The driver finalizes via
+// driverRespondAccept, the ONLY place a seat is reserved + a pickup code is
+// issued + competing requests are auto-cancelled. So the driver always decides
+// who rides in their car.
 func respondAccept(c *gin.Context, passengerID, requestID string) {
 	ctx := c.Request.Context()
 
@@ -114,15 +128,20 @@ func respondAccept(c *gin.Context, passengerID, requestID string) {
 	}
 	defer tx.Rollback(ctx) // safe no-op after commit
 
-	// 1) Lock the matching pending ride_request and find its driver.
+	// Lock the offered row; capture the driver + projected pickup for the
+	// driver's incoming-request UI.
 	var driverID string
+	var pickupLat, pickupLng float64
 	err = tx.QueryRow(ctx, `
-		SELECT driver_id FROM ride_requests
-		WHERE id = $1 AND passenger_id = $2 AND status = 'pending'
+		SELECT driver_id,
+		       COALESCE(ST_Y(pickup_location::geometry), 0),
+		       COALESCE(ST_X(pickup_location::geometry), 0)
+		FROM ride_requests
+		WHERE id = $1 AND passenger_id = $2 AND status = 'offered'
 		FOR UPDATE
-	`, requestID, passengerID).Scan(&driverID)
+	`, requestID, passengerID).Scan(&driverID, &pickupLat, &pickupLng)
 	if errors.Is(err, pgx.ErrNoRows) {
-		c.JSON(http.StatusConflict, gin.H{"error": "request not pending"})
+		c.JSON(http.StatusConflict, gin.H{"error": "offer no longer available"})
 		return
 	}
 	if err != nil {
@@ -130,10 +149,8 @@ func respondAccept(c *gin.Context, passengerID, requestID string) {
 		return
 	}
 
-	// 1b) Re-validate position: the driver may have driven past the pickup
-	// between match and accept. If they provably have (fresh location, pickup
-	// now behind), expire the row and free the slot instead of reserving a seat
-	// for a ride that can't happen.
+	// Fast-fail if the driver has provably driven past the pickup since the
+	// offer was sent — no point asking them to confirm an impossible ride.
 	if aheadM, ok := pickupStillAhead(ctx, tx, requestID); ok && aheadM < config.C.MatchMinAheadM {
 		if expirePassedRide(ctx, tx, requestID, passengerID) {
 			c.JSON(http.StatusConflict, gin.H{"error": "driver already passed the pickup"})
@@ -143,106 +160,37 @@ func respondAccept(c *gin.Context, passengerID, requestID string) {
 		return
 	}
 
-	// 2) Lock the driver's capacity row, validate & reserve a seat.
-	var seats, taken int
-	err = tx.QueryRow(ctx, `
-		SELECT seats, seats_taken FROM active_drivers
-		WHERE driver_id = $1 AND status IN ('looking','full')
-		FOR UPDATE
-	`, driverID).Scan(&seats, &taken)
-	if errors.Is(err, pgx.ErrNoRows) {
-		c.JSON(http.StatusGone, gin.H{"error": "driver no longer active"})
-		return
-	}
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
-		return
-	}
-	if taken >= seats {
-		c.JSON(http.StatusConflict, gin.H{"error": "ride is full"})
-		return
-	}
-	newTaken := taken + 1
-	newStatus := "looking"
-	if newTaken >= seats {
-		newStatus = "full"
-	}
+	// Promote: offered → pending (awaiting the driver's confirm).
 	if _, err = tx.Exec(ctx, `
-		UPDATE active_drivers
-		SET seats_taken = $1, status = $2
-		WHERE driver_id = $3
-	`, newTaken, newStatus, driverID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
-		return
-	}
-
-	// 3) Flip this request to accepted.
-	if _, err = tx.Exec(ctx, `
-		UPDATE ride_requests SET status = 'accepted'
-		WHERE id = $1
+		UPDATE ride_requests SET status = 'pending' WHERE id = $1
 	`, requestID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
-
-	// 4) Auto-cancel passenger's OTHER pending/accepted rows.
-	rows, err := tx.Query(ctx, `
-		UPDATE ride_requests SET status = 'cancelled'
-		WHERE passenger_id = $1
-		  AND status IN ('pending','accepted')
-		  AND id <> $2
-		RETURNING id, driver_id
-	`, passengerID, requestID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
-		return
-	}
-	var bumped []bumpedRequest
-	for rows.Next() {
-		var b bumpedRequest
-		if rows.Scan(&b.ID, &b.DriverID) == nil {
-			bumped = append(bumped, b)
-		}
-	}
-	rows.Close()
 
 	if err := tx.Commit(ctx); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
 
-	// 5) Post-commit notifications (best-effort).
+	// Notify the driver with the same event the passenger-initiated flow uses,
+	// so their incoming-request list + SnackBar fire and they can Accept/Decline.
+	passengerName, paxPhotoURL, avg, count := loadPassengerProfile(passengerID)
 	var driverFCM string
 	db.DB.QueryRow(ctx,
-		`SELECT COALESCE(fcm_token, '') FROM users WHERE id = $1`, driverID,
+		`SELECT COALESCE(fcm_token,'') FROM users WHERE id = $1`, driverID,
 	).Scan(&driverFCM)
-
-	passengerName, paxPhotoURL, avg, count := loadPassengerProfile(passengerID)
-
-	// Pickup-confirmation code: assigned exactly once per row at first accept.
-	// Both sides see it via the WS payloads below + the row's persisted value
-	// (so a reconnect via /driver/requests or /passenger/my-requests rehydrates
-	// the code without a round-trip).
-	pickupCode, _ := services.SetPickupCode(ctx, requestID)
-
-	services.NotifyDriverPassengerResponded(driverFCM, passengerID, "accepted")
-	Hub.SendToUser(driverID, "ride_response", gin.H{
+	services.NotifyDriverPassengerRequested(driverFCM, passengerID)
+	Hub.SendToUser(driverID, "passenger_request", gin.H{
+		"request_id":             requestID,
 		"passenger_id":           passengerID,
 		"passenger_name":         passengerName,
 		"passenger_photo_url":    paxPhotoURL,
 		"passenger_avg_rating":   avg,
 		"passenger_rating_count": count,
-		"request_id":             requestID,
-		"status":                 "accepted",
-		"pickup_code":            pickupCode,
+		"pickup_lat":             pickupLat,
+		"pickup_lng":             pickupLng,
 	})
-
-	for _, b := range bumped {
-		Hub.SendToUser(b.DriverID, "ride_cancelled", gin.H{
-			"request_id":   b.ID,
-			"cancelled_by": "passenger_matched_elsewhere",
-		})
-	}
 
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -275,7 +223,7 @@ func GetMyRequests(c *gin.Context) {
 		JOIN users u ON u.id = rr.driver_id
 		LEFT JOIN ratings r ON r.rated_id = rr.driver_id
 		WHERE rr.passenger_id = $1
-		  AND rr.status IN ('pending','accepted','in_progress')
+		  AND rr.status IN ('offered','pending','accepted','in_progress')
 		GROUP BY rr.id, rr.driver_id, rr.status, rr.created_at,
 		         u.name, u.car_make, u.car_model, u.car_color, u.car_plate,
 		         u.photo_url, rr.picked_up_at
@@ -327,22 +275,26 @@ func GetMyRequests(c *gin.Context) {
 
 func NearbyDrivers(c *gin.Context) {
 	var req struct {
-		Lat          float64 `json:"latitude" binding:"required"`
-		Lng          float64 `json:"longitude" binding:"required"`
-		RadiusKm     float64 `json:"radius_km"`
-		DestLat      float64 `json:"dest_lat"`
-		DestLng      float64 `json:"dest_lng"`
-		DestRadiusKm float64 `json:"dest_radius_km"`
+		Lat          *float64 `json:"latitude" binding:"required"`
+		Lng          *float64 `json:"longitude" binding:"required"`
+		RadiusKm     float64  `json:"radius_km" binding:"max=100"`
+		DestLat      float64  `json:"dest_lat"`
+		DestLng      float64  `json:"dest_lng"`
+		DestRadiusKm float64  `json:"dest_radius_km" binding:"max=100"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !validLatLng(*req.Lat, *req.Lng) || !validLatLng(req.DestLat, req.DestLng) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "coordinates out of range"})
 		return
 	}
 	if req.RadiusKm <= 0 {
 		req.RadiusKm = 10
 	}
 	callerID := c.GetString("user_id")
-	drivers, err := services.GetNearbyDrivers(req.Lat, req.Lng, req.RadiusKm, req.DestLat, req.DestLng, req.DestRadiusKm, callerID)
+	drivers, err := services.GetNearbyDrivers(*req.Lat, *req.Lng, req.RadiusKm, req.DestLat, req.DestLng, req.DestRadiusKm, callerID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
@@ -381,21 +333,35 @@ func RequestDriver(c *gin.Context) {
 	// No-detour invariant: the pickup is the passenger PROJECTED ONTO the
 	// driver's route, never their raw location. Reject if that projection is
 	// too far to walk to, or already behind the driver.
-	var pickupLat, pickupLng, walkM, aheadM float64
+	//
+	// Freshness gate: same rule as the corridor query — NO origin fallback.
+	// A driver whose position is stale/unknown must not read as "still at the
+	// start" (that made the whole route look ahead and sent passengers to
+	// pickups the driver passed long ago). loc_fresh distinguishes "behind
+	// you" from "position unknown" for the error message.
+	var pickupLat, pickupLng, walkM float64
+	var aheadM *float64
 	err := db.DB.QueryRow(ctx, `
 		SELECT ST_Y(p.geom::geometry), ST_X(p.geom::geometry),
 		       ST_Distance(ap.location, p.geom),
-		       (
-		           ST_LineLocatePoint(ad.route::geometry, ap.location::geometry)
-		         - ST_LineLocatePoint(ad.route::geometry, COALESCE(ad.current_location, ad.origin)::geometry)
-		       ) * ST_Length(ad.route)
+		       CASE WHEN ad.current_location IS NOT NULL
+		             AND ad.current_location_at > NOW() - make_interval(secs => $3::float8)
+		            THEN SIGN(f.pf - f.df) * ST_Length(ST_LineSubstring(
+		                     ad.route::geometry, LEAST(f.df, f.pf), GREATEST(f.df, f.pf)
+		                 )::geography)
+		            END
 		FROM active_passengers ap
 		JOIN active_drivers ad ON ad.driver_id = $2
 		CROSS JOIN LATERAL (
 		    SELECT ST_ClosestPoint(ad.route::geometry, ap.location::geometry)::geography AS geom
 		) p
+		CROSS JOIN LATERAL (
+		    SELECT ST_LineLocatePoint(ad.route::geometry, ap.location::geometry) AS pf,
+		           ST_LineLocatePoint(ad.route::geometry,
+		               COALESCE(ad.current_location, ad.origin)::geometry)       AS df
+		) f
 		WHERE ap.passenger_id = $1 AND ad.route IS NOT NULL
-	`, passengerID, req.DriverID).Scan(&pickupLat, &pickupLng, &walkM, &aheadM)
+	`, passengerID, req.DriverID, config.C.MatchLocFreshS).Scan(&pickupLat, &pickupLng, &walkM, &aheadM)
 	if errors.Is(err, pgx.ErrNoRows) {
 		c.JSON(http.StatusConflict, gin.H{"error": "driver is not available"})
 		return
@@ -408,7 +374,11 @@ func RequestDriver(c *gin.Context) {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "you're too far from the driver's route"})
 		return
 	}
-	if aheadM < config.C.MatchMinAheadM {
+	if aheadM == nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "driver's position is not up to date — try again shortly"})
+		return
+	}
+	if *aheadM < config.C.MatchMinAheadM {
 		c.JSON(http.StatusConflict, gin.H{"error": "the driver has already passed you"})
 		return
 	}
@@ -504,26 +474,26 @@ func PassengerCancelRide(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
-// PassengerCancelPendingRequest cancels a passenger's outstanding pending
-// ride_request (one that hasn't been accepted yet). Distinct from
-// PassengerCancelRide which only acts on accepted rows and adjusts driver
-// capacity. Emits passenger_request_cancelled to the driver so their pending
-// tile disappears.
 // PassengerSearch persists the passenger's destination on active_passengers and
 // returns an OSRM route from current location to destination so the client can
 // draw the planned trip on the map. The destination also tightens
 // FindPassengersInCorridor so only drivers actually heading that way notify.
 func PassengerSearch(c *gin.Context) {
 	var req struct {
-		DestLat       float64 `json:"dest_lat" binding:"required"`
-		DestLng       float64 `json:"dest_lng" binding:"required"`
-		PreferAI      bool    `json:"prefer_ai"`        // accepted but unused in Phase 1
-		AllowLongWalk bool    `json:"allow_long_walk"`  // opt in to a longer walk-to-pickup
+		DestLat       *float64 `json:"dest_lat" binding:"required"`
+		DestLng       *float64 `json:"dest_lng" binding:"required"`
+		PreferAI      bool     `json:"prefer_ai"`       // accepted but unused in Phase 1
+		AllowLongWalk bool     `json:"allow_long_walk"` // opt in to a longer walk-to-pickup
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if !validLatLng(*req.DestLat, *req.DestLng) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "coordinates out of range"})
+		return
+	}
+	destLat, destLng := *req.DestLat, *req.DestLng
 	passengerID := c.GetString("user_id")
 	ctx := c.Request.Context()
 
@@ -541,14 +511,14 @@ func PassengerSearch(c *gin.Context) {
 		SET destination_lat = $1, destination_lng = $2,
 		    allow_long_walk = $3, updated_at = NOW()
 		WHERE passenger_id = $4
-	`, req.DestLat, req.DestLng, req.AllowLongWalk, passengerID); err != nil {
+	`, destLat, destLng, req.AllowLongWalk, passengerID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
 
 	routeWkt := ""
 	distanceKm := 0.0
-	if r, err := services.GetRoadRoute(originLat, originLng, req.DestLat, req.DestLng); err == nil {
+	if r, err := services.GetRoadRoute(originLat, originLng, destLat, destLng); err == nil {
 		routeWkt = r.WKT
 		distanceKm = r.DistanceKm
 	}
@@ -559,6 +529,11 @@ func PassengerSearch(c *gin.Context) {
 	})
 }
 
+// PassengerCancelPendingRequest cancels a passenger's outstanding pending
+// ride_request (one that hasn't been accepted yet). Distinct from
+// PassengerCancelRide which only acts on accepted rows and adjusts driver
+// capacity. Emits passenger_request_cancelled to the driver so their pending
+// tile disappears.
 func PassengerCancelPendingRequest(c *gin.Context) {
 	requestID := c.Param("request_id")
 	passengerID := c.GetString("user_id")
@@ -606,6 +581,18 @@ func RepositionForDriver(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, res)
+}
+
+// MatchAdvice returns a diagnosis of why the passenger may not be matching plus
+// ordered, localizable suggestion codes. Read-only.
+func MatchAdvice(c *gin.Context) {
+	passengerID := c.GetString("user_id")
+	advice, err := services.GetMatchAdvice(passengerID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	c.JSON(http.StatusOK, advice)
 }
 
 func GoOffline(c *gin.Context) {

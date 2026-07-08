@@ -244,6 +244,57 @@ func TestPassengerCancelPendingRequest_FlipsStatus(t *testing.T) {
 	assert.Equal(t, "cancelled", status)
 }
 
+// ── /passenger/respond (handshake: accept an offer) ────────────────────────
+
+// Accepting a driver-broadcast offer must NOT finalize — it promotes the row to
+// 'pending' (awaiting the driver's confirm) and reserves no seat.
+func TestRespondAccept_PromotesOfferedToPending(t *testing.T) {
+	pool, r := setupHandlers(t)
+	driverID, _ := testutil.CreateUser(t, pool, "driver", "d1")
+	passengerID, tok := testutil.CreateUser(t, pool, "passenger", "p1")
+	testutil.CreateActiveDriver(t, pool, driverID,
+		testutil.LatLng{Lat: 50, Lng: 20},
+		testutil.LatLng{Lat: 50, Lng: 20.1},
+		testutil.LineStringWKT([2]float64{20, 50}, [2]float64{20.1, 50}),
+	)
+	// A driver-broadcast offer with the pickup ~1.4 km ahead.
+	reqID, _, err := services.CreateRideRequestWithStatus(
+		driverID, passengerID, 50, 20.02, "offered")
+	require.NoError(t, err)
+
+	w := testutil.PostJSON(t, r, "/passenger/respond", tok, map[string]any{
+		"request_id": reqID, "status": "accepted",
+	})
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var status string
+	var seats int
+	require.NoError(t, pool.QueryRow(ctx(t),
+		`SELECT status FROM ride_requests WHERE id = $1`, reqID).Scan(&status))
+	require.NoError(t, pool.QueryRow(ctx(t),
+		`SELECT seats_taken FROM active_drivers WHERE driver_id = $1`, driverID).Scan(&seats))
+	assert.Equal(t, "pending", status, "accept only requests; driver must confirm")
+	assert.Equal(t, 0, seats, "no seat reserved on passenger accept")
+}
+
+// ── /passenger/match-advice ────────────────────────────────────────────────
+
+func TestMatchAdvice_TripTooShort(t *testing.T) {
+	pool, r := setupHandlers(t)
+	passengerID, tok := testutil.CreateUser(t, pool, "passenger", "p1")
+	// Destination ~140 m away → under the 1 km short-trip threshold.
+	dest := testutil.LatLng{Lat: 50.0, Lng: 20.002}
+	testutil.CreateActivePassenger(t, pool, passengerID,
+		testutil.LatLng{Lat: 50.0, Lng: 20.0}, &dest)
+
+	w := testutil.PostJSON(t, r, "/passenger/match-advice", tok, map[string]any{})
+	require.Equal(t, http.StatusOK, w.Code)
+	var advice map[string]any
+	testutil.DecodeJSON(t, w, &advice)
+	assert.Equal(t, true, advice["trip_too_short"])
+	assert.Contains(t, advice["suggestions"], "trip_too_short")
+}
+
 // ── /passenger/active DELETE (go offline) ──────────────────────────────────
 
 func TestGoOffline_DeletesActiveRow(t *testing.T) {

@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/Pavelbotsu/sameway_backend/db"
 	"github.com/Pavelbotsu/sameway_backend/models"
@@ -47,6 +48,7 @@ func GetDriverPlannedTrips(driverID string) ([]models.PlannedTrip, error) {
 }
 
 func SearchPlannedTrips(originLat, originLng, destLat, destLng, radiusKm float64, sortBy, plannedAfter string) ([]models.PlannedTrip, error) {
+	// ORDER BY comes from a fixed whitelist — never from client input.
 	orderClause := "pt.planned_at ASC"
 	switch sortBy {
 	case "distance":
@@ -55,15 +57,15 @@ func SearchPlannedTrips(originLat, originLng, destLat, destLng, radiusKm float64
 		orderClause = "pt.destination_name ASC"
 	}
 
-	destFilter := ""
-	if destLat != 0 && destLng != 0 {
-		destFilter = fmt.Sprintf(`AND ST_DWithin(pt.destination::geography, ST_MakePoint(%f,%f)::geography, %f * 1000)`,
-			destLng, destLat, radiusKm)
-	}
-
-	afterClause := "NOW()"
+	// All client values are bound parameters. planned_after is validated as a
+	// timestamp here rather than spliced into the SQL text.
+	var after *time.Time
 	if plannedAfter != "" {
-		afterClause = fmt.Sprintf("'%s'::timestamptz", plannedAfter)
+		t, err := time.Parse(time.RFC3339, plannedAfter)
+		if err != nil {
+			return nil, fmt.Errorf("planned_after must be RFC3339: %w", err)
+		}
+		after = &t
 	}
 
 	query := fmt.Sprintf(`
@@ -75,14 +77,15 @@ func SearchPlannedTrips(originLat, originLng, destLat, destLng, radiusKm float64
 		FROM planned_trips pt
 		JOIN users u ON u.id = pt.driver_id
 		WHERE ST_DWithin(pt.origin::geography, ST_MakePoint($2,$1)::geography, $3 * 1000)
-		%s
-		AND pt.planned_at > %s
+		AND ($4::float8 = 0 OR ST_DWithin(pt.destination::geography, ST_MakePoint($5,$4)::geography, $3 * 1000))
+		AND pt.planned_at > COALESCE($6::timestamptz, NOW())
 		AND pt.status = 'open'
 		ORDER BY %s
 		LIMIT 50
-	`, destFilter, afterClause, orderClause)
+	`, orderClause)
 
-	rows, err := db.DB.Query(context.Background(), query, originLat, originLng, radiusKm)
+	rows, err := db.DB.Query(context.Background(), query,
+		originLat, originLng, radiusKm, destLat, destLng, after)
 	if err != nil {
 		return nil, err
 	}
@@ -97,7 +100,10 @@ func DeletePlannedTrip(tripID, driverID string) error {
 	return err
 }
 
-func scanPlannedTrips(rows interface{ Next() bool; Scan(...any) error }) ([]models.PlannedTrip, error) {
+func scanPlannedTrips(rows interface {
+	Next() bool
+	Scan(...any) error
+}) ([]models.PlannedTrip, error) {
 	var trips []models.PlannedTrip
 	for rows.Next() {
 		var t models.PlannedTrip

@@ -1,4 +1,4 @@
-﻿package models
+package models
 
 import "time"
 
@@ -15,11 +15,15 @@ const (
 )
 
 const (
-	RequestPending       = "pending"
-	RequestAccepted      = "accepted"
-	RequestInProgress    = "in_progress"
-	RequestDeclined      = "declined"
-	RequestCancelled     = "cancelled"
+	// RequestOffered is a driver-broadcast corridor offer awaiting the
+	// passenger's accept. Passenger accept → pending (awaiting driver) →
+	// accepted, so the driver always confirms who rides.
+	RequestOffered    = "offered"
+	RequestPending    = "pending"
+	RequestAccepted   = "accepted"
+	RequestInProgress = "in_progress"
+	RequestDeclined   = "declined"
+	RequestCancelled  = "cancelled"
 	// RequestExpiredPassed is a terminal status set when the driver has
 	// provably passed the pickup before the ride became active (re-validated
 	// at accept and swept by the reaper). It sits OUTSIDE the active set in
@@ -28,22 +32,22 @@ const (
 )
 
 type User struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Email     string    `json:"email"`
-	Password  string    `json:"-"`
-	Role      string    `json:"role"`
-	FCMToken  string    `json:"fcm_token,omitempty"`
-	PhotoURL  string    `json:"photo_url,omitempty"`
-	Verified  bool      `json:"verified"`
-	Bio       string    `json:"bio"`
-	Phone     string    `json:"phone"`
+	ID              string     `json:"id"`
+	Name            string     `json:"name"`
+	Email           string     `json:"email"`
+	Password        string     `json:"-"`
+	Role            string     `json:"role"`
+	FCMToken        string     `json:"fcm_token,omitempty"`
+	PhotoURL        string     `json:"photo_url,omitempty"`
+	Verified        bool       `json:"verified"`
+	Bio             string     `json:"bio"`
+	Phone           string     `json:"phone"`
 	EmailVerifiedAt *time.Time `json:"email_verified_at,omitempty"`
-	CarMake   string    `json:"car_make,omitempty"`
-	CarModel  string    `json:"car_model,omitempty"`
-	CarColor  string    `json:"car_color,omitempty"`
-	CarPlate  string    `json:"car_plate,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	CarMake         string     `json:"car_make,omitempty"`
+	CarModel        string     `json:"car_model,omitempty"`
+	CarColor        string     `json:"car_color,omitempty"`
+	CarPlate        string     `json:"car_plate,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
 }
 
 type ActiveDriver struct {

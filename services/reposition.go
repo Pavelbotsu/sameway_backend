@@ -74,7 +74,9 @@ func RepositionPickup(driverID, passengerID string) (RepositionResult, bool, err
 		                ST_Distance(pax.loc, g.pt::geography)               AS walk_m,
 		                ST_Distance(pax.loc, g.pt::geography) / $4::float8   AS walk_s,
 		                ST_InterpolatePoint(ad.rm, g.pt) - ad.dt            AS drive_s,
-		                (params.dropoff_frac - f) * ad.len                  AS carry_m,
+		                SIGN(params.dropoff_frac - f) * ST_Length(ST_LineSubstring(
+		                    ad.rg, LEAST(f, params.dropoff_frac), GREATEST(f, params.dropoff_frac)
+		                )::geography)                                       AS carry_m,
 		                CASE WHEN (ST_InterpolatePoint(ad.rm, g.p2) - ST_InterpolatePoint(ad.rm, g.p1)) > 0
 		                     THEN ST_Distance(g.p1::geography, g.p2::geography)
 		                          / (ST_InterpolatePoint(ad.rm, g.p2) - ST_InterpolatePoint(ad.rm, g.p1)) * 3.6
@@ -89,9 +91,9 @@ func RepositionPickup(driverID, passengerID string) (RepositionResult, bool, err
 		LIMIT 1
 	`,
 		driverID, passengerID,
-		config.C.MatchLocFreshS, // $3
-		walkSpeedMps,            // $4
-		config.C.MatchWalkLongM, // $5
+		config.C.MatchLocFreshS,   // $3
+		walkSpeedMps,              // $4
+		config.C.MatchWalkLongM,   // $5
 		config.C.MatchFastRoadKmh, // $6
 	).Scan(&r.Lat, &r.Lng, &r.WalkM, &r.WalkEtaS, &r.DriveEtaS, &r.CarryM)
 	if errors.Is(err, pgx.ErrNoRows) {

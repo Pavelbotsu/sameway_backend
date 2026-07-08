@@ -1,8 +1,10 @@
-﻿package middleware
+package middleware
 
 import (
+	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Pavelbotsu/sameway_backend/config"
 	"github.com/gin-gonic/gin"
@@ -16,13 +18,13 @@ func Auth() gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing token"})
 			return
 		}
-		claims, err := ParseToken(token)
+		userID, role, err := ParseToken(token)
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
 			return
 		}
-		c.Set("user_id", claims["user_id"].(string))
-		c.Set("role", claims["role"].(string))
+		c.Set("user_id", userID)
+		c.Set("role", role)
 		c.Next()
 	}
 }
@@ -38,24 +40,45 @@ func RequireRole(role string) gin.HandlerFunc {
 }
 
 func GenerateToken(userID, role string) (string, error) {
+	ttl := time.Duration(config.C.JWTTTLHours) * time.Hour
+	if ttl <= 0 {
+		ttl = 720 * time.Hour
+	}
+	now := time.Now()
 	t := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"user_id": userID,
 		"role":    role,
+		"iat":     now.Unix(),
+		"exp":     now.Add(ttl).Unix(),
 	})
 	return t.SignedString([]byte(config.C.JWTSecret))
 }
 
-func ParseToken(tokenStr string) (jwt.MapClaims, error) {
+// ParseToken validates the token (signature, and expiry when present — tokens
+// issued before the exp claim was introduced remain valid until users
+// re-login) and returns the user_id and role claims. Both must be present
+// and strings; a structurally valid token without them is rejected rather
+// than panicking downstream.
+func ParseToken(tokenStr string) (userID, role string, err error) {
 	t, err := jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, jwt.ErrSignatureInvalid
-		}
 		return []byte(config.C.JWTSecret), nil
-	})
-	if err != nil || !t.Valid {
-		return nil, err
+	}, jwt.WithValidMethods([]string{"HS256", "HS384", "HS512"}))
+	if err != nil {
+		return "", "", err
 	}
-	return t.Claims.(jwt.MapClaims), nil
+	if !t.Valid {
+		return "", "", errors.New("invalid token")
+	}
+	claims, ok := t.Claims.(jwt.MapClaims)
+	if !ok {
+		return "", "", errors.New("unexpected claims type")
+	}
+	userID, uok := claims["user_id"].(string)
+	role, rok := claims["role"].(string)
+	if !uok || !rok || userID == "" || role == "" {
+		return "", "", errors.New("token missing required claims")
+	}
+	return userID, role, nil
 }
 
 func tokenFromRequest(c *gin.Context) string {

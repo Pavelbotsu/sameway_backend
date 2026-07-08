@@ -3,7 +3,7 @@ package ranker
 import "context"
 
 // GeometricRanker preserves the SQL ordering produced by
-// FindPassengersInCorridor (driver_to_pickup_m ASC). It is the always-safe
+// FindPassengersInCorridor (eta_pickup_s ASC). It is the always-safe
 // fallback and the default when AI is disabled.
 type GeometricRanker struct{}
 

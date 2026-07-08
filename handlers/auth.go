@@ -2,7 +2,10 @@ package handlers
 
 import (
 	"context"
+	"errors"
+	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Pavelbotsu/sameway_backend/db"
@@ -10,6 +13,7 @@ import (
 	"github.com/Pavelbotsu/sameway_backend/models"
 	"github.com/Pavelbotsu/sameway_backend/services"
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgconn"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -25,6 +29,11 @@ func Register(c *gin.Context) {
 		return
 	}
 
+	// Normalize: the reset/verify flows lower-case emails before lookup, so a
+	// mixed-case registration would otherwise never be able to reset its
+	// password.
+	emailAddr := strings.ToLower(strings.TrimSpace(req.Email))
+
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
@@ -34,10 +43,18 @@ func Register(c *gin.Context) {
 	var id string
 	err = db.DB.QueryRow(context.Background(),
 		`INSERT INTO users (name, email, password, role) VALUES ($1,$2,$3,$4) RETURNING id`,
-		req.Name, req.Email, string(hash), req.Role,
+		req.Name, emailAddr, string(hash), req.Role,
 	).Scan(&id)
 	if err != nil {
-		c.JSON(http.StatusConflict, gin.H{"error": "email already registered"})
+		// Only a unique violation means "taken" — anything else is an outage
+		// and must not masquerade as a duplicate email.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			c.JSON(http.StatusConflict, gin.H{"error": "email already registered"})
+			return
+		}
+		log.Printf("Register: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
 
@@ -46,7 +63,7 @@ func Register(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
-	c.JSON(http.StatusCreated, gin.H{"token": token, "user_id": id, "role": req.Role, "name": req.Name, "email": req.Email})
+	c.JSON(http.StatusCreated, gin.H{"token": token, "user_id": id, "role": req.Role, "name": req.Name, "email": emailAddr})
 }
 
 func Login(c *gin.Context) {
@@ -59,10 +76,11 @@ func Login(c *gin.Context) {
 		return
 	}
 
+	emailAddr := strings.ToLower(strings.TrimSpace(req.Email))
 	var id, hash, role, name string
 	err := db.DB.QueryRow(context.Background(),
 		`SELECT id, password, role, name FROM users WHERE email = $1`,
-		req.Email,
+		emailAddr,
 	).Scan(&id, &hash, &role, &name)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
@@ -151,23 +169,34 @@ func GetTripHistory(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"trips": trips, "user_id": userID})
 }
 
+// UpdateProfile is a partial update: only fields present in the JSON body are
+// written. Pointer fields distinguish "absent" (keep) from "empty string"
+// (deliberately clear) — previously a {"name": "..."}-only body silently
+// wiped all car fields.
 func UpdateProfile(c *gin.Context) {
 	var req struct {
-		Name     string `json:"name"`
-		CarMake  string `json:"car_make"`
-		CarModel string `json:"car_model"`
-		CarColor string `json:"car_color"`
-		CarPlate string `json:"car_plate"`
+		Name     *string `json:"name"`
+		CarMake  *string `json:"car_make"`
+		CarModel *string `json:"car_model"`
+		CarColor *string `json:"car_color"`
+		CarPlate *string `json:"car_plate"`
 	}
-	c.ShouldBindJSON(&req)
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if req.Name != nil && strings.TrimSpace(*req.Name) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name cannot be empty"})
+		return
+	}
 	userID := c.GetString("user_id")
 	_, err := db.DB.Exec(context.Background(), `
 		UPDATE users SET
-		    name      = CASE WHEN $1 <> '' THEN $1 ELSE name END,
-		    car_make  = $2,
-		    car_model = $3,
-		    car_color = $4,
-		    car_plate = $5
+		    name      = COALESCE($1, name),
+		    car_make  = COALESCE($2, car_make),
+		    car_model = COALESCE($3, car_model),
+		    car_color = COALESCE($4, car_color),
+		    car_plate = COALESCE($5, car_plate)
 		WHERE id = $6`,
 		req.Name, req.CarMake, req.CarModel, req.CarColor, req.CarPlate, userID,
 	)
@@ -196,9 +225,13 @@ func SwitchRole(c *gin.Context) {
 	ctx := c.Request.Context()
 	switch oldRole {
 	case "driver":
+		// 'offered' included so no dangling corridor offers survive the
+		// switch (a passenger could otherwise accept a ride from a driver
+		// who no longer has a route).
 		rows, err := db.DB.Query(ctx, `
-			SELECT id, passenger_id FROM ride_requests
-			WHERE driver_id = $1 AND status IN ('pending','accepted')
+			UPDATE ride_requests SET status = 'cancelled'
+			WHERE driver_id = $1 AND status IN ('offered','pending','accepted')
+			RETURNING id, passenger_id
 		`, userID)
 		if err == nil {
 			for rows.Next() {
@@ -212,21 +245,29 @@ func SwitchRole(c *gin.Context) {
 			}
 			rows.Close()
 		}
-		db.DB.Exec(ctx, `
-			UPDATE ride_requests SET status = 'cancelled'
-			WHERE driver_id = $1 AND status IN ('pending','accepted')
-		`, userID)
 		db.DB.Exec(ctx, `DELETE FROM active_drivers WHERE driver_id = $1`, userID)
 
 	case "passenger":
+		// CTE so we report the PRE-update status (plain RETURNING would show
+		// 'cancelled' for every row).
 		rows, err := db.DB.Query(ctx, `
-			SELECT id, driver_id FROM ride_requests
-			WHERE passenger_id = $1 AND status IN ('pending','accepted')
+			WITH old AS (
+				SELECT id, driver_id, status FROM ride_requests
+				WHERE passenger_id = $1 AND status IN ('offered','pending','accepted')
+			), upd AS (
+				UPDATE ride_requests SET status = 'cancelled'
+				WHERE id IN (SELECT id FROM old)
+			)
+			SELECT id, driver_id, status FROM old
 		`, userID)
 		if err == nil {
 			for rows.Next() {
-				var reqID, driverID string
-				if rows.Scan(&reqID, &driverID) == nil {
+				var reqID, driverID, wasStatus string
+				if rows.Scan(&reqID, &driverID, &wasStatus) == nil {
+					// Drivers never saw 'offered' rows — nothing to tear down.
+					if wasStatus == models.RequestOffered {
+						continue
+					}
 					Hub.SendToUser(driverID, "passenger_request_cancelled", gin.H{
 						"request_id":   reqID,
 						"cancelled_by": "passenger_role_switch",
@@ -235,10 +276,6 @@ func SwitchRole(c *gin.Context) {
 			}
 			rows.Close()
 		}
-		db.DB.Exec(ctx, `
-			UPDATE ride_requests SET status = 'cancelled'
-			WHERE passenger_id = $1 AND status IN ('pending','accepted')
-		`, userID)
 		db.DB.Exec(ctx, `DELETE FROM active_passengers WHERE passenger_id = $1`, userID)
 	}
 

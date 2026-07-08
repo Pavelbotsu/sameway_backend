@@ -1,7 +1,4 @@
-/db/postgres.go
-/db/spatial_services.go
-/docker/docker-compose.yml
 .env
 serviceAccountKey.json
 simulate.exe
-/handlers/auth.goS
+*.exe

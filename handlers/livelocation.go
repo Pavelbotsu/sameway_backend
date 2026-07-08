@@ -30,3 +30,17 @@ func shouldRelayLiveLoc(requestID string) bool {
 	liveLocLast[requestID] = now
 	return true
 }
+
+// sweepLiveLocThrottle drops throttle entries idle for over an hour — rides
+// are long finished by then. Without this the map grows one entry per ride
+// forever. Called from the reaper tick.
+func sweepLiveLocThrottle() {
+	cutoff := time.Now().Add(-time.Hour)
+	liveLocMu.Lock()
+	for id, last := range liveLocLast {
+		if last.Before(cutoff) {
+			delete(liveLocLast, id)
+		}
+	}
+	liveLocMu.Unlock()
+}

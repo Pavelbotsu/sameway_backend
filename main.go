@@ -1,4 +1,4 @@
-﻿package main
+package main
 
 import (
 	"log"
@@ -15,15 +15,17 @@ import (
 
 func main() {
 	config.Load()
+	if err := config.C.Validate(); err != nil {
+		log.Fatalf("config: %v", err)
+	}
+	if config.C.IsProd() {
+		gin.SetMode(gin.ReleaseMode)
+	}
 
 	if err := db.Connect(); err != nil {
 		log.Fatalf("postgres: %v", err)
 	}
 	defer db.DB.Close()
-
-	if err := db.ConnectRedis(); err != nil {
-		log.Printf("redis unavailable (%v) â€” continuing without it", err)
-	}
 
 	services.InitFirebase()
 	ranker.Init(config.C)
@@ -84,6 +86,7 @@ func main() {
 		passenger.POST("/search", handlers.PassengerSearch)
 		passenger.POST("/request-driver", handlers.RequestDriver)
 		passenger.POST("/reposition", handlers.RepositionForDriver)
+		passenger.POST("/match-advice", handlers.MatchAdvice)
 		passenger.GET("/my-requests", handlers.GetMyRequests)
 		passenger.DELETE("/active", handlers.GoOffline)
 		passenger.DELETE("/ride/:request_id", handlers.PassengerCancelRide)

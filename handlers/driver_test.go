@@ -205,6 +205,50 @@ func TestDriverRespondToRide_RejectsWhenDriverPassed(t *testing.T) {
 	assert.Equal(t, 0, seatsTaken, "no seat reserved for a passed-by ride")
 }
 
+// A corridor match (driver broadcast) must be created as 'offered', not
+// 'pending' — the passenger has to accept before the driver is asked to confirm.
+func TestSetRoute_CreatesOfferedRow(t *testing.T) {
+	pool, r := setupHandlers(t)
+	driverID, tok := testutil.CreateUser(t, pool, "driver", "d1")
+	passengerID, _ := testutil.CreateUser(t, pool, "passenger", "p1")
+	testutil.CreateActivePassenger(t, pool, passengerID,
+		testutil.LatLng{Lat: 50.0, Lng: 20.02}, nil)
+	testutil.SwapRouter(t, &testutil.MockOSRM{})
+
+	w := testutil.PostJSON(t, r, "/driver/route", tok, map[string]any{
+		"origin_lat": 50.0, "origin_lng": 20.0,
+		"destination_lat": 50.0, "destination_lng": 20.1,
+		"corridor_km": 1.0, "seats": 2,
+	})
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var status string
+	require.NoError(t, pool.QueryRow(ctx(t),
+		`SELECT status FROM ride_requests WHERE driver_id = $1 AND passenger_id = $2`,
+		driverID, passengerID).Scan(&status))
+	assert.Equal(t, "offered", status)
+}
+
+// The reaper expires un-answered offers (passenger never accepted) past timeout.
+func TestReaper_ExpiresStaleOffered(t *testing.T) {
+	pool, _ := setupHandlers(t)
+	driverID, _ := testutil.CreateUser(t, pool, "driver", "d-off")
+	passengerID, _ := testutil.CreateUser(t, pool, "passenger", "p-off")
+	reqID, _, err := services.CreateRideRequestWithStatus(
+		driverID, passengerID, 50, 20, "offered")
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx(t),
+		`UPDATE ride_requests SET created_at = NOW() - INTERVAL '10 minutes' WHERE id = $1`, reqID)
+	require.NoError(t, err)
+
+	handlers.ReapStalePendingOnce(5)
+
+	var status string
+	require.NoError(t, pool.QueryRow(ctx(t),
+		`SELECT status FROM ride_requests WHERE id = $1`, reqID).Scan(&status))
+	assert.Equal(t, "cancelled", status)
+}
+
 // The reaper proactively expires pending requests whose driver has provably
 // driven past the pickup, freeing the slot before the timeout.
 func TestReaper_ExpiresPassedPickup(t *testing.T) {

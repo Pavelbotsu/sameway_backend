@@ -1,4 +1,4 @@
-﻿package services
+package services
 
 import (
 	"context"
@@ -60,8 +60,19 @@ func UpsertActiveDriver(driverID, routeWKT, routeMEWKT string, originLat, origin
 			current_location_at = NOW(),
 			corridor_km         = EXCLUDED.corridor_km,
 			seats               = EXCLUDED.seats,
-			seats_taken         = 0,
-			status              = 'looking',
+			-- Re-broadcasting a route must NOT forget riders already on board:
+			-- recompute occupancy from live requests instead of zeroing it,
+			-- or a driver with 2 accepted riders could over-accept.
+			seats_taken         = (
+				SELECT COUNT(*)::int FROM ride_requests rr
+				WHERE rr.driver_id = EXCLUDED.driver_id
+				  AND rr.status IN ('accepted','in_progress')
+			),
+			status              = CASE WHEN (
+				SELECT COUNT(*)::int FROM ride_requests rr
+				WHERE rr.driver_id = EXCLUDED.driver_id
+				  AND rr.status IN ('accepted','in_progress')
+			) >= EXCLUDED.seats THEN 'full' ELSE 'looking' END,
 			created_at          = NOW()
 	`, driverID, originLat, originLng, destLat, destLng, routeWKT, routeMEWKT, corridorKm, seats)
 	return err
@@ -94,6 +105,12 @@ func UpsertActiveDriver(driverID, routeWKT, routeMEWKT string, originLat, origin
 //
 // Road class is inferred from the OSRM-implied speed at the pickup (distance/
 // time over a small window of the measured route line) — no external OSM data.
+//
+// On corridorKm: it only sets the bounding pre-filter radius and the on-route
+// dropoff tolerance. It does NOT loosen match quality — every match is
+// independently bounded by the walk caps (walk_in, and walk_in+walk_out) and
+// the carry minimum. So a wide corridor (e.g. 6 km) just widens the candidate
+// net; it cannot produce a far-off-route/long-walk match.
 //
 // Not done here: a heading/carriageway reject (#5) is intentionally omitted —
 // with a single OSRM centerline it can't separate carriageways and a naive
@@ -138,6 +155,13 @@ func FindPassengersInCorridor(driverID, routeWKT string, corridorKm, destLat, de
 			) d ON TRUE
 			WHERE ST_DWithin(ap.location::geography, ST_GeogFromText($2), GREATEST($3::float8, $9::float8))
 			  AND ap.updated_at > NOW() - INTERVAL '10 minutes'
+			  -- Never match the driver's own passenger row (stale state after a
+			  -- role switch would otherwise let a driver corridor-match themself).
+			  AND u.id <> $1
+			  -- Only a committed engagement removes a passenger from the pool.
+			  -- An un-answered 'offered' row does NOT: multiple drivers may offer
+			  -- concurrently (the passenger picks), otherwise the first broadcast
+			  -- locks every corridor passenger for the full offer timeout.
 			  AND NOT EXISTS (
 			      SELECT 1 FROM ride_requests rr
 			      WHERE rr.passenger_id = u.id
@@ -147,10 +171,17 @@ func FindPassengersInCorridor(driverID, routeWKT string, corridorKm, destLat, de
 		s AS (
 			SELECT c.*,
 			       ST_Distance(pax_loc, pickup_geog)                       AS walk_in_m,
-			       (pickup_frac - dfrac) * len_m                           AS driver_to_pickup_m,
+			       -- Along-route METERS via ST_LineSubstring: ST_LineLocatePoint
+			       -- fractions live in degree space, so fraction-difference ×
+			       -- geography-length drifts on routes that mix N-S and E-W legs.
+			       SIGN(pickup_frac - dfrac) * ST_Length(ST_LineSubstring(
+			           route_geom, LEAST(dfrac, pickup_frac), GREATEST(dfrac, pickup_frac)
+			       )::geography)                                           AS driver_to_pickup_m,
 			       ST_InterpolatePoint(route_m, pickup_geog::geometry) - dt AS eta_pickup_s,
 			       CASE WHEN dropoff_frac IS NOT NULL
-			            THEN (dropoff_frac - pickup_frac) * len_m END      AS carry_m,
+			            THEN SIGN(dropoff_frac - pickup_frac) * ST_Length(ST_LineSubstring(
+			                route_geom, LEAST(pickup_frac, dropoff_frac), GREATEST(pickup_frac, dropoff_frac)
+			            )::geography) END                                  AS carry_m,
 			       -- Road class inferred from OSRM-implied speed at the pickup:
 			       -- distance/time over a small window on the measured line.
 			       CASE WHEN (ST_InterpolatePoint(route_m, win.p2) - ST_InterpolatePoint(route_m, win.p1)) > 0
@@ -246,25 +277,31 @@ func DeleteActivePassenger(passengerID string) error {
 	return err
 }
 
-// CreateRideRequest creates a new ride_request row OR returns the existing
-// active row's id without mutating it. Idempotent — safe to call from both
-// the driver-initiated (SetRoute corridor match) and passenger-initiated
-// (RequestDriver) flows. The partial unique index `uniq_active_ride_request`
-// (defined in db/postgres.go) scopes uniqueness to status IN ('pending','accepted'),
-// so cancelled/declined history rows coexist freely.
-//
-// Returns (id, isNew, error). isNew=false means the caller should NOT emit a
-// fresh ride_request WS notification — the passenger has already been notified
-// for this driver.
+// CreateRideRequest creates a passenger-initiated request (status 'pending',
+// awaiting the driver). Thin wrapper over CreateRideRequestWithStatus.
 func CreateRideRequest(driverID, passengerID string, pickupLat, pickupLng float64) (string, bool, error) {
+	return CreateRideRequestWithStatus(driverID, passengerID, pickupLat, pickupLng, "pending")
+}
+
+// CreateRideRequestWithStatus creates a new ride_request row at the given
+// initial status OR returns the existing active row's id without mutating it.
+// Idempotent — safe for both the driver-initiated corridor match (status
+// 'offered') and the passenger-initiated RequestDriver flow ('pending'). The
+// partial unique index `uniq_active_ride_request` (db/postgres.go) scopes
+// uniqueness to the active set (offered/pending/accepted/in_progress), so
+// cancelled/declined/expired history rows coexist freely.
+//
+// Returns (id, isNew, error). isNew=false means an active row already existed —
+// the caller should NOT emit a fresh notification.
+func CreateRideRequestWithStatus(driverID, passengerID string, pickupLat, pickupLng float64, status string) (string, bool, error) {
 	ctx := context.Background()
 	var id string
 	err := db.DB.QueryRow(ctx, `
 		INSERT INTO ride_requests (driver_id, passenger_id, pickup_location, status)
-		VALUES ($1, $2, ST_MakePoint($4, $3)::geography, 'pending')
-		ON CONFLICT (driver_id, passenger_id) WHERE status IN ('pending','accepted','in_progress') DO NOTHING
+		VALUES ($1, $2, ST_MakePoint($4, $3)::geography, $5)
+		ON CONFLICT (driver_id, passenger_id) WHERE status IN ('offered','pending','accepted','in_progress') DO NOTHING
 		RETURNING id
-	`, driverID, passengerID, pickupLat, pickupLng).Scan(&id)
+	`, driverID, passengerID, pickupLat, pickupLng, status).Scan(&id)
 	if err == nil {
 		return id, true, nil
 	}
@@ -275,7 +312,7 @@ func CreateRideRequest(driverID, passengerID string, pickupLat, pickupLng float6
 	err = db.DB.QueryRow(ctx, `
 		SELECT id FROM ride_requests
 		WHERE driver_id = $1 AND passenger_id = $2
-		  AND status IN ('pending','accepted','in_progress')
+		  AND status IN ('offered','pending','accepted','in_progress')
 		LIMIT 1
 	`, driverID, passengerID).Scan(&id)
 	if err != nil {
@@ -329,11 +366,16 @@ func GetDriverRequests(driverID string) ([]models.RideRequest, error) {
 	return requests, rows.Err()
 }
 
+// UpdateRideRequestStatus flips a passenger-owned request to `status`, but
+// only from pre-seat states ('offered'/'pending'). Accepted and in-progress
+// rides must go through the cancel endpoints, which also restore the
+// driver's seat count — flipping them here would strand capacity.
 func UpdateRideRequestStatus(requestID, passengerID, status string) (*models.RideRequest, error) {
 	var r models.RideRequest
 	err := db.DB.QueryRow(context.Background(), `
 		UPDATE ride_requests SET status = $1
 		WHERE id = $2 AND passenger_id = $3
+		  AND status IN ('offered','pending')
 		RETURNING id, driver_id, passenger_id,
 		          COALESCE(ST_Y(pickup_location::geometry), 0),
 		          COALESCE(ST_X(pickup_location::geometry), 0),

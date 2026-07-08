@@ -1,4 +1,4 @@
-﻿package db
+package db
 
 import (
 	"context"
@@ -183,7 +183,7 @@ const alterSQL = `
 		DROP INDEX IF EXISTS uniq_active_ride_request;
 		CREATE UNIQUE INDEX IF NOT EXISTS uniq_active_ride_request
 			ON ride_requests (driver_id, passenger_id)
-			WHERE status IN ('pending','accepted','in_progress');
+			WHERE status IN ('offered','pending','accepted','in_progress');
 
 		-- Bug reports: in-app feedback channel. Read with psql; future
 		-- versions may forward to email/Slack.
@@ -266,7 +266,45 @@ const alterSQL = `
 		-- New terminal status: driver provably passed the pickup before the
 		-- ride went active. Outside the active set in uniq_active_ride_request,
 		-- so it frees the passenger's match slot immediately.
+		--
+		-- 'offered' = a driver-broadcast corridor offer awaiting the passenger's
+		-- accept. The passenger's accept promotes it to 'pending' (awaiting the
+		-- driver's confirm); the driver finalizes to 'accepted'. So the driver
+		-- always decides who rides. Note the index is per (driver, passenger)
+		-- PAIR: a passenger may hold offers from several drivers at once (they
+		-- pick), but never two active rows with the same driver. Committed
+		-- engagements (pending/accepted/in_progress) remove the passenger from
+		-- corridor candidacy via the NOT EXISTS in FindPassengersInCorridor.
 		ALTER TABLE ride_requests DROP CONSTRAINT IF EXISTS ride_requests_status_check;
 		ALTER TABLE ride_requests ADD CONSTRAINT ride_requests_status_check
-			CHECK (status IN ('pending','accepted','in_progress','done','declined','cancelled','expired_passed'));
+			CHECK (status IN ('offered','pending','accepted','in_progress','done','declined','cancelled','expired_passed'));
+
+		-- ── Release hardening ─────────────────────────────────────────────────
+		-- Brute-force cap on reset / verification codes: the row dies after
+		-- too many wrong guesses, not just on TTL.
+		ALTER TABLE password_resets ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0;
+		ALTER TABLE email_verifications ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0;
+
+		-- Status-scan indexes: the reaper sweeps ride_requests every 60 s and
+		-- every request-list endpoint filters on (party, status); the partial
+		-- unique index only covers active-status pairs.
+		CREATE INDEX IF NOT EXISTS idx_ride_requests_driver_status
+			ON ride_requests (driver_id, status);
+		CREATE INDEX IF NOT EXISTS idx_ride_requests_passenger_status
+			ON ride_requests (passenger_id, status);
+		CREATE INDEX IF NOT EXISTS idx_ride_requests_status_created
+			ON ride_requests (status, created_at);
+
+		-- Rating aggregates are recomputed on every profile load / match
+		-- notify; trip history filters by either party.
+		CREATE INDEX IF NOT EXISTS idx_ratings_rated ON ratings (rated_id);
+		CREATE INDEX IF NOT EXISTS idx_completed_trips_driver ON completed_trips (driver_id);
+		CREATE INDEX IF NOT EXISTS idx_completed_trips_passenger ON completed_trips (passenger_id);
+
+		-- One completed_trips row per ride: gives RecordCompletedTrip's
+		-- ON CONFLICT DO NOTHING an actual arbiter (previously there was no
+		-- unique constraint, so double-submits duplicated CO2/km stats).
+		CREATE UNIQUE INDEX IF NOT EXISTS uniq_completed_trips_request
+			ON completed_trips (ride_request_id)
+			WHERE ride_request_id IS NOT NULL;
 `

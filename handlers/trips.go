@@ -1,7 +1,10 @@
 package handlers
 
 import (
+	"log"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/Pavelbotsu/sameway_backend/models"
 	"github.com/Pavelbotsu/sameway_backend/services"
@@ -9,19 +12,29 @@ import (
 )
 
 func PlanTrip(c *gin.Context) {
+	// Pointer coords: `required` on plain floats rejects legal zero values
+	// (equator / Greenwich meridian).
 	var req struct {
-		OriginName  string  `json:"origin_name" binding:"required"`
-		OriginLat   float64 `json:"origin_lat" binding:"required"`
-		OriginLng   float64 `json:"origin_lng" binding:"required"`
-		DestName    string  `json:"dest_name" binding:"required"`
-		DestLat     float64 `json:"dest_lat" binding:"required"`
-		DestLng     float64 `json:"dest_lng" binding:"required"`
-		Seats       int     `json:"seats" binding:"required,min=1,max=6"`
-		CorridorKm  float64 `json:"corridor_km"`
-		PlannedAt   string  `json:"planned_at" binding:"required"`
+		OriginName string   `json:"origin_name" binding:"required"`
+		OriginLat  *float64 `json:"origin_lat" binding:"required"`
+		OriginLng  *float64 `json:"origin_lng" binding:"required"`
+		DestName   string   `json:"dest_name" binding:"required"`
+		DestLat    *float64 `json:"dest_lat" binding:"required"`
+		DestLng    *float64 `json:"dest_lng" binding:"required"`
+		Seats      int      `json:"seats" binding:"required,min=1,max=6"`
+		CorridorKm float64  `json:"corridor_km" binding:"max=50"`
+		PlannedAt  string   `json:"planned_at" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !validLatLng(*req.OriginLat, *req.OriginLng) || !validLatLng(*req.DestLat, *req.DestLng) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "coordinates out of range"})
+		return
+	}
+	if _, err := time.Parse(time.RFC3339, req.PlannedAt); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "planned_at must be an RFC3339 timestamp"})
 		return
 	}
 	if req.CorridorKm <= 0 {
@@ -30,14 +43,14 @@ func PlanTrip(c *gin.Context) {
 
 	driverID := c.GetString("user_id")
 
-	route, err := services.GetRoadRoute(req.OriginLat, req.OriginLng, req.DestLat, req.DestLng)
+	route, err := services.GetRoadRoute(*req.OriginLat, *req.OriginLng, *req.DestLat, *req.DestLng)
 	if err != nil {
 		route = &services.RouteResult{WKT: "", DistanceKm: 0}
 	}
 
 	id, err := services.CreatePlannedTrip(
-		driverID, req.OriginName, req.OriginLat, req.OriginLng,
-		req.DestName, req.DestLat, req.DestLng,
+		driverID, req.OriginName, *req.OriginLat, *req.OriginLng,
+		req.DestName, *req.DestLat, *req.DestLng,
 		req.CorridorKm, route.DistanceKm, req.Seats, req.PlannedAt, route.WKT,
 	)
 	if err != nil {
@@ -72,16 +85,20 @@ func CancelPlannedTrip(c *gin.Context) {
 
 func SearchTrips(c *gin.Context) {
 	var req struct {
-		OriginLat    float64 `json:"origin_lat" binding:"required"`
-		OriginLng    float64 `json:"origin_lng" binding:"required"`
-		DestLat      float64 `json:"dest_lat"`
-		DestLng      float64 `json:"dest_lng"`
-		RadiusKm     float64 `json:"radius_km"`
-		SortBy       string  `json:"sort_by"`
-		PlannedAfter string  `json:"planned_after"`
+		OriginLat    *float64 `json:"origin_lat" binding:"required"`
+		OriginLng    *float64 `json:"origin_lng" binding:"required"`
+		DestLat      float64  `json:"dest_lat"`
+		DestLng      float64  `json:"dest_lng"`
+		RadiusKm     float64  `json:"radius_km" binding:"max=500"`
+		SortBy       string   `json:"sort_by" binding:"omitempty,oneof=distance destination time"`
+		PlannedAfter string   `json:"planned_after"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !validLatLng(*req.OriginLat, *req.OriginLng) || !validLatLng(req.DestLat, req.DestLng) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "coordinates out of range"})
 		return
 	}
 	if req.RadiusKm <= 0 {
@@ -89,12 +106,17 @@ func SearchTrips(c *gin.Context) {
 	}
 
 	trips, err := services.SearchPlannedTrips(
-		req.OriginLat, req.OriginLng,
+		*req.OriginLat, *req.OriginLng,
 		req.DestLat, req.DestLng,
 		req.RadiusKm, req.SortBy, req.PlannedAfter,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
+		if strings.Contains(err.Error(), "planned_after") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "planned_after must be an RFC3339 timestamp"})
+			return
+		}
+		log.Printf("SearchTrips: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
 	if trips == nil {

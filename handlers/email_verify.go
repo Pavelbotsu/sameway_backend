@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"crypto/subtle"
 	"errors"
 	"net/http"
 	"strings"
@@ -109,9 +110,10 @@ func ConfirmEmailVerify(c *gin.Context) {
 
 	var storedCode string
 	var expiresAt time.Time
+	var attempts int
 	err := db.DB.QueryRow(ctx,
-		`SELECT code, expires_at FROM email_verifications WHERE user_id = $1`, userID,
-	).Scan(&storedCode, &expiresAt)
+		`SELECT code, expires_at, attempts FROM email_verifications WHERE user_id = $1`, userID,
+	).Scan(&storedCode, &expiresAt, &attempts)
 	if errors.Is(err, pgx.ErrNoRows) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "no code requested"})
 		return
@@ -120,11 +122,17 @@ func ConfirmEmailVerify(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
+	if attempts >= resetMaxAttempts {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many attempts — request a new code"})
+		return
+	}
 	if time.Now().After(expiresAt) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "code expired"})
 		return
 	}
-	if storedCode != code {
+	if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(storedCode)), []byte(code)) != 1 {
+		_, _ = db.DB.Exec(ctx,
+			`UPDATE email_verifications SET attempts = attempts + 1 WHERE user_id = $1`, userID)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "incorrect code"})
 		return
 	}

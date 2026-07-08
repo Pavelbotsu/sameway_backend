@@ -84,29 +84,59 @@ func TestDriverInitiatedFlow(t *testing.T) {
 	})
 	require.Equal(t, http.StatusOK, w.Code)
 
-	// Passenger receives ride_request.
+	// Passenger receives the offer (status 'offered').
 	evtType, payload := testutil.ReadEvent(t, paxConn, 3*time.Second)
 	require.Equal(t, "ride_request", evtType)
 	reqID := payload["request_id"].(string)
 	assert.NotEmpty(t, payload["pickup_lat"], "pickup point should be populated")
 
-	// Passenger accepts.
+	// Driver connects so it can receive the passenger's interest.
+	driverConn := testutil.DialWS(t, wsBase, driverTok)
+	time.Sleep(100 * time.Millisecond)
+
+	// Passenger accepts the offer → promotes to 'pending' (awaiting the driver),
+	// NOT finalized: no seat reserved yet. The driver is notified.
 	w = testutil.PostJSON(t, r, "/passenger/respond", paxTok, map[string]any{
 		"request_id": reqID, "status": "accepted",
 	})
 	require.Equal(t, http.StatusOK, w.Code)
 
-	// Confirm DB state: row accepted, seats_taken=1.
 	var status string
 	var seatsTaken int
 	require.NoError(t, pool.QueryRow(t.Context(),
 		`SELECT status FROM ride_requests WHERE id = $1`, reqID).Scan(&status))
 	require.NoError(t, pool.QueryRow(t.Context(),
-		`SELECT seats_taken FROM active_drivers WHERE driver_id = (
-			SELECT driver_id FROM ride_requests WHERE id = $1)`, reqID).Scan(&seatsTaken))
+		`SELECT seats_taken FROM active_drivers WHERE driver_id = $1`,
+		driverIDFor(t, pool, reqID)).Scan(&seatsTaken))
+	assert.Equal(t, "pending", status, "passenger accept only requests; driver must confirm")
+	assert.Equal(t, 0, seatsTaken, "no seat reserved until the driver confirms")
+
+	// Driver receives the passenger_request and confirms.
+	evtType, _ = testutil.ReadEvent(t, driverConn, 3*time.Second)
+	require.Equal(t, "passenger_request", evtType)
+	w = testutil.PostJSON(t, r, "/driver/respond", driverTok, map[string]any{
+		"request_id": reqID, "status": "accepted",
+	})
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// Now finalized: accepted + seat reserved.
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT status FROM ride_requests WHERE id = $1`, reqID).Scan(&status))
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT seats_taken FROM active_drivers WHERE driver_id = $1`,
+		driverIDFor(t, pool, reqID)).Scan(&seatsTaken))
 	assert.Equal(t, "accepted", status)
 	assert.Equal(t, 1, seatsTaken)
 	_ = passengerID
+}
+
+// driverIDFor returns the driver_id of a ride_request row.
+func driverIDFor(t *testing.T, pool *pgxpool.Pool, requestID string) string {
+	t.Helper()
+	var id string
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT driver_id FROM ride_requests WHERE id = $1`, requestID).Scan(&id))
+	return id
 }
 
 // TestPassengerInitiatedFlow exercises: passenger fetches nearby drivers →
@@ -283,26 +313,32 @@ func TestPickupHandshakeAndDropoff(t *testing.T) {
 		"corridor_km": 1.0, "seats": 2,
 	})
 	require.Equal(t, http.StatusOK, w.Code)
-	_, _ = testutil.ReadEvent(t, paxConn, 3*time.Second) // ride_request
+	evtType, payload := testutil.ReadEvent(t, paxConn, 3*time.Second) // offer
+	require.Equal(t, "ride_request", evtType)
+	reqID := payload["request_id"].(string)
 
-	// Passenger accepts. The driver_response WS payload carries pickup_code.
-	// SetPickupCode runs inside respondAccept.
-	// Fetch the request_id via /passenger/my-requests.
-	w = testutil.GetJSON(t, r, "/passenger/my-requests", paxTok)
-	require.Equal(t, http.StatusOK, w.Code)
-	var requests []map[string]any
-	testutil.DecodeJSON(t, w, &requests)
-	require.NotEmpty(t, requests)
-	reqID := requests[0]["request_id"].(string)
-
+	// Passenger accepts the offer → driver gets a passenger_request to confirm.
 	w = testutil.PostJSON(t, r, "/passenger/respond", paxTok, map[string]any{
 		"request_id": reqID, "status": "accepted",
 	})
 	require.Equal(t, http.StatusOK, w.Code)
-	// Driver's ride_response with pickup_code.
-	evtType, payload := testutil.ReadEvent(t, driverConn, 3*time.Second)
-	require.Equal(t, "ride_response", evtType)
-	code := payload["pickup_code"].(string)
+	evtType, _ = testutil.ReadEvent(t, driverConn, 3*time.Second)
+	require.Equal(t, "passenger_request", evtType)
+
+	// Driver confirms → seat reserved + pickup code generated on the row.
+	w = testutil.PostJSON(t, r, "/driver/respond", driverTok, map[string]any{
+		"request_id": reqID, "status": "accepted",
+	})
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// The pickup code is asymmetric — the driver reads it from /driver/requests
+	// (never sent to the passenger). The driver tells the passenger verbally.
+	w = testutil.GetJSON(t, r, "/driver/requests", driverTok)
+	require.Equal(t, http.StatusOK, w.Code)
+	var driverReqs []map[string]any
+	testutil.DecodeJSON(t, w, &driverReqs)
+	require.NotEmpty(t, driverReqs)
+	code := driverReqs[0]["pickup_code"].(string)
 	require.Len(t, code, 4, "pickup code should be a 4-digit string")
 
 	// Passenger asks the driver for the code (driver has it on their screen),
