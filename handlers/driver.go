@@ -1,10 +1,12 @@
 package handlers
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"log"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -66,6 +68,36 @@ func sweepCorridorRerunThrottle() {
 	corridorRerunMu.Unlock()
 }
 
+// emitCorridorStats pushes the driver's live matching counters over WS after
+// every corridor run (route set, movement re-run, passenger-appearance reverse
+// trigger). The driver UI renders these instead of the frozen SetRoute
+// response, fixing the "0 passengers notified never updates" bug. Best-effort:
+// a failed count query just skips the event, never the matching itself.
+func emitCorridorStats(driverID string, candidatesFound, newlyNotified int) {
+	// total_notified is cumulative for the CURRENT route (active_drivers.
+	// created_at resets on every route upsert), so the client can render it
+	// directly — summing per-event deltas client-side would double-count
+	// whenever an event races the SetRoute HTTP response.
+	var pending, totalNotified int
+	if err := db.DB.QueryRow(context.Background(), `
+		SELECT
+			COUNT(*) FILTER (WHERE rr.status IN ('offered','pending')),
+			COUNT(*) FILTER (WHERE rr.created_at >= ad.created_at)
+		FROM ride_requests rr
+		JOIN active_drivers ad ON ad.driver_id = rr.driver_id
+		WHERE rr.driver_id = $1
+	`, driverID).Scan(&pending, &totalNotified); err != nil {
+		log.Printf("emitCorridorStats %s: %v", driverID, err)
+		return
+	}
+	Hub.SendToUser(driverID, "corridor_stats", gin.H{
+		"candidates_found":       candidatesFound,
+		"new_notifications_sent": newlyNotified,
+		"active_pending_count":   pending,
+		"total_notified":         totalNotified,
+	})
+}
+
 // rerunCorridorMatch re-runs FindPassengersInCorridor with the driver's stored
 // route + destination + corridor and notifies any newly-eligible passengers.
 // Called from a goroutine in UpdateLocation; uses background context so a
@@ -97,10 +129,14 @@ func rerunCorridorMatch(driverID string) {
 		log.Printf("rerunCorridorMatch %s: %v", driverID, err)
 		return
 	}
-	if len(matches) == 0 {
-		return
+	notified := 0
+	if len(matches) > 0 {
+		notified = notifyCorridorMatches(driverID, matches, destLat, destLng, corridorKm, seats, false)
 	}
-	notifyCorridorMatches(driverID, matches, destLat, destLng, corridorKm, seats, false)
+	// Zero-match runs emit too — the counter must stay honest while parked.
+	emitCorridorStats(driverID, len(matches), notified)
+	// Already on a background goroutine — run the detour fallback inline.
+	runMicroDetourPass(driverID)
 }
 
 func SetRoute(c *gin.Context) {
@@ -160,6 +196,10 @@ func SetRoute(c *gin.Context) {
 		dLat, dLng,
 		req.CorridorKm, req.Seats, req.PreferAI,
 	)
+	emitCorridorStats(driverID, len(matches), notified)
+	// Micro-detour fallback (§2): opt-in, near-miss-only, async — an OSRM
+	// round-trip must not sit on the route-set response.
+	go safeGo("micro-detour-pass", func() { runMicroDetourPass(driverID) })()
 
 	c.JSON(http.StatusOK, gin.H{
 		"route_wkt":      route.WKT,
@@ -210,18 +250,21 @@ func notifyCorridorMatches(
 		// Corridor offers are created as 'offered' (awaiting the passenger's
 		// accept). The passenger's accept promotes to 'pending' and notifies
 		// the driver, who confirms — so the driver always decides.
-		requestID, isNew, err := services.CreateRideRequestWithStatus(
-			driverID, m.User.ID, m.PickupLat, m.PickupLng, models.RequestOffered)
+		details := services.RideRequestDetails{MatchKind: m.MatchKind}
+		if m.MatchKind == "partial_relay" {
+			dLat, dLng := m.DropoffLat, m.DropoffLng
+			details.DropoffLat, details.DropoffLng = &dLat, &dLng
+		}
+		if m.MatchKind == "micro_detour" {
+			addM, addS := m.DetourAddedM, m.DetourAddedS
+			details.DetourAddedM, details.DetourAddedS = &addM, &addS
+		}
+		requestID, isNew, err := services.CreateRideRequestFull(
+			driverID, m.User.ID, m.PickupLat, m.PickupLng, models.RequestOffered, details)
 		if err != nil || !isNew {
 			continue
 		}
-		// FCM is a synchronous HTTPS round-trip; up to 20 of them serially
-		// would add seconds to SetRoute. Fire-and-forget with recovery.
-		fcmToken := m.User.FCMToken
-		go safeGo("fcm-corridor-notify", func() {
-			services.NotifyPassengerRideAvailable(fcmToken, driverID, destLat, destLng)
-		})()
-		Hub.SendToUser(m.User.ID, "ride_request", gin.H{
+		payload := gin.H{
 			"request_id":                  requestID,
 			"driver_id":                   driverID,
 			"driver_name":                 driverName,
@@ -242,8 +285,51 @@ func notifyCorridorMatches(
 			"driver_distance_to_pickup_m": m.DriverToPickupM,
 			"match_method":                methodTag,
 			"match_kind":                  m.MatchKind,
-		})
+		}
+		if m.MatchKind == "partial_relay" {
+			// The passenger opts into "ride to X, then continue" BEFORE
+			// accepting — the offer card needs the dropoff and what the
+			// continuation looks like (stop nearby, or a fresh search).
+			payload["dropoff_lat"] = m.DropoffLat
+			payload["dropoff_lng"] = m.DropoffLng
+			payload["transit_stop_name"] = m.TransitStopName
+			payload["transit_stop_dist_m"] = m.TransitStopDistM
+			payload["relay_fallback"] = m.TransitStopName == ""
+		}
+		if m.MatchKind == "micro_detour" {
+			// Never silent: both sides see the delta the driver accepts.
+			payload["detour_added_m"] = m.DetourAddedM
+			payload["detour_added_s"] = m.DetourAddedS
+		}
+		// FCM is a synchronous HTTPS round-trip; up to 20 of them serially
+		// would add seconds to SetRoute. Fire-and-forget with recovery.
+		fcmToken := m.User.FCMToken
+		go safeGo("fcm-corridor-notify", func() {
+			services.NotifyPassengerRideAvailable(fcmToken, driverID, destLat, destLng)
+		})()
+		Hub.SendToUser(m.User.ID, "ride_request", payload)
 		notified++
+
+		kind, paxID, reqID := m.MatchKind, m.User.ID, requestID
+		go safeGo("match-event-offered", func() {
+			logMatchEventKnownKind(reqID, kind, "offered", map[string]any{
+				"walk_m": m.WalkM, "carry_m": m.CarryM, "eta_s": m.EtaPickupS,
+			})
+			// Relay leg-2 labeling: if this passenger finished a partial_relay
+			// ride in the last 30 minutes, this offer IS the second leg — log
+			// it on the ORIGINAL relay request so the funnel joins up.
+			var priorRelayID string
+			if err := db.DB.QueryRow(context.Background(), `
+				SELECT id FROM ride_requests
+				WHERE passenger_id = $1 AND match_kind = 'partial_relay'
+				  AND status = 'done'
+				  AND created_at > NOW() - INTERVAL '30 minutes'
+				ORDER BY created_at DESC LIMIT 1
+			`, paxID).Scan(&priorRelayID); err == nil {
+				logMatchEventKnownKind(priorRelayID, "partial_relay", "leg2_offer_created",
+					map[string]any{"leg2_request_id": reqID})
+			}
+		})()
 	}
 	return notified
 }
@@ -302,18 +388,18 @@ func rankAndReorder(
 	}
 	ordered := make([]services.CorridorMatch, len(matches))
 	copy(ordered, matches)
-	sortStable(ordered, func(a, b services.CorridorMatch) bool {
+	slices.SortStableFunc(ordered, func(a, b services.CorridorMatch) int {
 		ai, aok := posByID[a.User.ID]
 		bi, bok := posByID[b.User.ID]
 		switch {
 		case aok && bok:
-			return ai < bi
+			return cmp.Compare(ai, bi)
 		case aok:
-			return true
+			return -1
 		case bok:
-			return false
+			return 1
 		}
-		return false
+		return 0
 	})
 	return ordered, chosen.Name()
 }
@@ -347,16 +433,6 @@ func fetchPassengerRatings(ids []string) (map[string]ratingAgg, error) {
 		out[id] = agg
 	}
 	return out, nil
-}
-
-// sortStable is a tiny stable bubble-sort-via-insertion wrapper so we avoid
-// pulling sort.SliceStable's reflection cost in a hot path.
-func sortStable[T any](xs []T, less func(a, b T) bool) {
-	for i := 1; i < len(xs); i++ {
-		for j := i; j > 0 && less(xs[j], xs[j-1]); j-- {
-			xs[j], xs[j-1] = xs[j-1], xs[j]
-		}
-	}
 }
 
 func UpdateLocation(c *gin.Context) {
@@ -464,27 +540,49 @@ func UpdateStatus(c *gin.Context) {
 		rows, err := db.DB.Query(context.Background(), `
 			UPDATE ride_requests SET status = 'done'
 			WHERE driver_id = $1 AND status IN ('accepted','in_progress')
-			RETURNING id, passenger_id
+			RETURNING id, passenger_id, match_kind
 		`, driverID)
 		if err == nil {
+			// Drain the cursor FIRST, then act. The UPDATE has already
+			// committed by this point, so anything done while the rows are
+			// still streaming (a per-row INSERT, a WS push) holds a pool
+			// connection open and — worse — an error mid-stream used to exit
+			// the loop silently, leaving rides marked done in the database with
+			// no notification, no trip record, and a 200 on the response.
+			type doneRide struct{ ReqID, PassengerID, MatchKind string }
+			var done []doneRide
 			for rows.Next() {
-				var reqID, passengerID string
-				if rows.Scan(&reqID, &passengerID) == nil {
-					if req.DistanceKm > 0 {
-						if err := services.RecordCompletedTrip(reqID, driverID, passengerID, req.DistanceKm); err != nil {
-							log.Printf("UpdateStatus: record trip %s: %v", reqID, err)
-						}
-					}
-					payload := gin.H{
-						"request_id":   reqID,
-						"driver_id":    driverID,
-						"passenger_id": passengerID,
-					}
-					Hub.SendToUser(passengerID, "ride_done", payload)
-					Hub.SendToUser(driverID, "ride_done", payload)
+				var d doneRide
+				if err := rows.Scan(&d.ReqID, &d.PassengerID, &d.MatchKind); err != nil {
+					log.Printf("UpdateStatus: scan done row for %s: %v", driverID, err)
+					continue
 				}
+				done = append(done, d)
 			}
+			rowsErr := rows.Err()
 			rows.Close()
+			if rowsErr != nil {
+				// The rides ARE done in the database; we just couldn't read all
+				// of them back. Log loudly — the affected passengers will not
+				// have received ride_done and will resync via /my-requests.
+				log.Printf("UpdateStatus: bulk-done iteration for %s (rides committed, notifications may be incomplete): %v",
+					driverID, rowsErr)
+			}
+			for _, d := range done {
+				if req.DistanceKm > 0 {
+					if err := services.RecordCompletedTrip(d.ReqID, driverID, d.PassengerID, req.DistanceKm); err != nil {
+						log.Printf("UpdateStatus: record trip %s: %v", d.ReqID, err)
+					}
+				}
+				payload := gin.H{
+					"request_id":   d.ReqID,
+					"driver_id":    driverID,
+					"passenger_id": d.PassengerID,
+				}
+				Hub.SendToUser(d.PassengerID, "ride_done", payload)
+				Hub.SendToUser(driverID, "ride_done", payload)
+				startRelayLeg2IfNeeded(d.ReqID, d.PassengerID, d.MatchKind)
+			}
 			if _, err := db.DB.Exec(context.Background(),
 				`UPDATE active_drivers SET seats_taken = 0 WHERE driver_id = $1`,
 				driverID,
@@ -496,6 +594,24 @@ func UpdateStatus(c *gin.Context) {
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// startRelayLeg2IfNeeded kicks off the second leg of a partial-relay ride at
+// dropoff (Round 2 §1): the passenger's active_passengers row (destination
+// intact) stays in the pool, they get an explicit relay_leg2_search event so
+// the UI flips back to "searching for your next leg", and a reverse corridor
+// check runs immediately from their current position — no throttle, this is
+// the moment they're standing at the dropoff. Also logs the outcome trail.
+func startRelayLeg2IfNeeded(requestID, passengerID, matchKind string) {
+	logMatchEventKnownKind(requestID, matchKind, "completed", nil)
+	if matchKind != "partial_relay" {
+		return
+	}
+	Hub.SendToUser(passengerID, "relay_leg2_search", gin.H{
+		"request_id": requestID,
+	})
+	logMatchEventKnownKind(requestID, matchKind, "leg2_search_started", nil)
+	go safeGo("relay-leg2-match", func() { reverseMatchForPassenger(passengerID) })()
 }
 
 // DropoffPassenger ends a single passenger's ride without ending the driver's
@@ -524,12 +640,12 @@ func DropoffPassenger(c *gin.Context) {
 
 	// Lock the ride_request and the active_drivers row together so we never
 	// race with /pickup/confirm or /driver/respond.
-	var passengerID, status string
+	var passengerID, status, matchKind string
 	err = tx.QueryRow(ctx, `
-		SELECT passenger_id, status FROM ride_requests
+		SELECT passenger_id, status, match_kind FROM ride_requests
 		WHERE id = $1 AND driver_id = $2
 		FOR UPDATE
-	`, requestID, driverID).Scan(&passengerID, &status)
+	`, requestID, driverID).Scan(&passengerID, &status, &matchKind)
 	if errors.Is(err, pgx.ErrNoRows) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "ride not found or not yours"})
 		return
@@ -575,6 +691,7 @@ func DropoffPassenger(c *gin.Context) {
 	}
 	Hub.SendToUser(passengerID, "ride_done", payload)
 	Hub.SendToUser(driverID, "ride_done", payload)
+	startRelayLeg2IfNeeded(requestID, passengerID, matchKind)
 
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -726,6 +843,9 @@ func DriverCancelRide(c *gin.Context) {
 		"request_id":   requestID,
 		"cancelled_by": "driver",
 	})
+	go safeGo("match-event", func() {
+		logMatchEvent(requestID, "cancelled", map[string]any{"by": "driver"})
+	})()
 
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -743,16 +863,34 @@ func DeleteRoute(c *gin.Context) {
 		driverID,
 	)
 	if err == nil {
+		var cancelled []string
+		type cancelledRide struct{ ReqID, PassengerID string }
+		var toNotify []cancelledRide
 		for rows.Next() {
-			var reqID, passengerID string
-			if rows.Scan(&reqID, &passengerID) == nil {
-				Hub.SendToUser(passengerID, "ride_cancelled", gin.H{
-					"request_id":   reqID,
-					"cancelled_by": "driver",
-				})
+			var cr cancelledRide
+			if err := rows.Scan(&cr.ReqID, &cr.PassengerID); err != nil {
+				log.Printf("DeleteRoute: scan cancelled row for %s: %v", driverID, err)
+				continue
 			}
+			toNotify = append(toNotify, cr)
+			cancelled = append(cancelled, cr.ReqID)
+		}
+		if err := rows.Err(); err != nil {
+			log.Printf("DeleteRoute: iteration for %s (rows cancelled, notifications may be incomplete): %v",
+				driverID, err)
 		}
 		rows.Close()
+		for _, cr := range toNotify {
+			Hub.SendToUser(cr.PassengerID, "ride_cancelled", gin.H{
+				"request_id":   cr.ReqID,
+				"cancelled_by": "driver",
+			})
+		}
+		go safeGo("match-event", func() {
+			for _, id := range cancelled {
+				logMatchEvent(id, "cancelled", map[string]any{"by": "driver_route_deleted"})
+			}
+		})()
 	}
 
 	if err := services.DeleteActiveDriver(driverID); err != nil {
@@ -815,6 +953,7 @@ func driverRespondDecline(c *gin.Context, driverID, requestID string) {
 		"car_plate":           carPlate,
 		"status":              "declined",
 	})
+	go safeGo("match-event", func() { logMatchEvent(requestID, "driver_declined", nil) })()
 
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -994,6 +1133,12 @@ func driverRespondAccept(c *gin.Context, driverID, requestID string) {
 			"cancelled_by": "passenger_matched_elsewhere",
 		})
 	}
+	go safeGo("match-event", func() {
+		logMatchEvent(requestID, "driver_accepted", nil)
+		for _, b := range bumpedRows {
+			logMatchEvent(b.ID, "cancelled", map[string]any{"by": "passenger_matched_elsewhere"})
+		}
+	})()
 
 	c.JSON(http.StatusOK, gin.H{"ok": true, "pickup_code": pickupCode})
 }

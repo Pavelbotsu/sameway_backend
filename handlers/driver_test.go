@@ -237,8 +237,15 @@ func TestReaper_ExpiresStaleOffered(t *testing.T) {
 	reqID, _, err := services.CreateRideRequestWithStatus(
 		driverID, passengerID, 50, 20, "offered")
 	require.NoError(t, err)
-	_, err = pool.Exec(ctx(t),
-		`UPDATE ride_requests SET created_at = NOW() - INTERVAL '10 minutes' WHERE id = $1`, reqID)
+	// Age status_changed_at, not created_at: the reaper now measures how long a
+	// row has sat in its CURRENT status, so that each status gets its own full
+	// window (see TestReaper_PendingGetsFreshWindowAfterAccept). For a row that
+	// was never promoted, the two are equivalent.
+	_, err = pool.Exec(ctx(t), `
+		UPDATE ride_requests
+		SET created_at = NOW() - INTERVAL '10 minutes',
+		    status_changed_at = NOW() - INTERVAL '10 minutes'
+		WHERE id = $1`, reqID)
 	require.NoError(t, err)
 
 	handlers.ReapStalePendingOnce(5)
@@ -292,7 +299,11 @@ func TestDeleteRoute_ClearsActiveDriver(t *testing.T) {
 	assert.Equal(t, 0, n)
 }
 
-// ── /driver/pickup-route/:request_id ──────────────────────────────────────
+// ── /pickup-route/:request_id ─────────────────────────────────────────────
+// The /driver-namespaced alias was removed: it existed as a compat shim for
+// "older driver builds" that never shipped, and this test was its only caller.
+// Both parties use the unnamespaced route; the handler gates on
+// participant-of-the-row rather than on role.
 
 func TestGetPickupRoute_ReturnsBothLegs(t *testing.T) {
 	pool, r := setupHandlers(t)
@@ -312,7 +323,7 @@ func TestGetPickupRoute_ReturnsBothLegs(t *testing.T) {
 	require.NoError(t, err)
 	testutil.SwapRouter(t, &testutil.MockOSRM{})
 
-	w := testutil.GetJSON(t, r, "/driver/pickup-route/"+reqID, tok)
+	w := testutil.GetJSON(t, r, "/pickup-route/"+reqID, tok)
 	require.Equal(t, http.StatusOK, w.Code)
 	var resp map[string]any
 	testutil.DecodeJSON(t, w, &resp)

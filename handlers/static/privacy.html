@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sameway — Privacy Policy</title>
+<style>
+  body{font-family:system-ui,sans-serif;max-width:720px;margin:40px auto;padding:0 16px;line-height:1.55;color:#1b1b29}
+  .draft{background:#fff3cd;border:1px solid #e0b400;padding:12px;border-radius:8px}
+  table{border-collapse:collapse;width:100%;font-size:14px}
+  td,th{border:1px solid #ccc;padding:6px;text-align:left;vertical-align:top}
+</style>
+</head>
+<body>
+<!--
+  DRAFT generated from what the code actually does (audit 2026-10-08).
+  It is NOT legal advice. Have a Polish data-protection lawyer review it,
+  fill every [PLACEHOLDER], and provide Polish and Ukrainian versions before
+  release. When the meaning changes, bump handlers.CurrentTermsVersion and
+  lib/core/legal.dart kTermsVersion so users are asked to accept again.
+-->
+<p class="draft"><b>Draft — pending legal review.</b> Version 1, effective [DATE].</p>
+
+<h1>Privacy Policy</h1>
+
+<h2>1. Who we are</h2>
+<p>Sameway is operated by [COMPANY NAME], [ADDRESS], [KRS/NIP] ("we"). Contact for privacy matters: [PRIVACY EMAIL].</p>
+
+<h2>2. What Sameway is</h2>
+<p>Sameway connects drivers who are already making a trip with passengers going the same way. Rides are not paid through Sameway and drivers do not earn money from them.</p>
+
+<h2>3. Data we process</h2>
+<table>
+<tr><th>Data</th><th>Why</th><th>Legal basis</th><th>How long</th></tr>
+<tr><td>Name, email, password (hashed), role</td><td>Your account and sign-in</td><td>Contract (art. 6(1)(b) GDPR)</td><td>Until you delete your account</td></tr>
+<tr><td>Optional profile: photo, bio, phone, car make/model/colour/plate</td><td>Showing who you are to the people you ride with</td><td>Contract</td><td>Until you remove it or delete your account</td></tr>
+<tr><td>Precise location while you use matching, and during an accepted ride</td><td>Finding drivers/passengers going your way; showing the other person where you are during a ride</td><td>Contract</td><td>Current position: replaced on every update, removed when you go offline. Pickup/drop-off points of rides: [RETENTION PERIOD]</td></tr>
+<tr><td>Driver location in the background (Android) while a route is active</td><td>Keeping drivers visible to passengers when the screen is off; shown by a persistent notification</td><td>Contract</td><td>Stops when the route ends</td></tr>
+<tr><td>Ride history, ratings, pickup confirmations</td><td>Running rides, trust between users, your stats</td><td>Contract; legitimate interest in safety (art. 6(1)(f))</td><td>[RETENTION PERIOD]</td></tr>
+<tr><td>Chat messages</td><td>Letting matched users coordinate</td><td>Contract</td><td>Chats without a completed ride: deleted after 90 days of inactivity. Others: [RETENTION PERIOD]</td></tr>
+<tr><td>Reports, blocks, safety flags</td><td>Keeping users safe, handling abuse</td><td>Legitimate interest</td><td>[RETENTION PERIOD]; kept after account deletion where needed for safety</td></tr>
+<tr><td>Push notification token</td><td>Sending ride and chat notifications</td><td>Contract</td><td>Until sign-out or deletion</td></tr>
+<tr><td>Usage analytics, crash reports and performance data (Firebase)</td><td>Improving the app</td><td><b>Consent</b> (you choose on first launch and can change it in Account &amp; security)</td><td>[FIREBASE RETENTION SETTING]</td></tr>
+<tr><td>Bug reports you send (incl. app version, device model)</td><td>Fixing problems</td><td>Legitimate interest</td><td>[RETENTION PERIOD]</td></tr>
+</table>
+<p>You must be 18 or older to use Sameway.</p>
+
+<h2>4. Who sees your data</h2>
+<ul>
+<!-- Describes CURRENT behaviour. Audit finding P0-2 (rounding driver
+     start/end points, plate only after accept) changes this — update the
+     sentence below when that ships. -->
+<li><b>Other users:</b> while a driver has an active route, signed-in passengers nearby can see the driver's name, rating, car make/model/colour, the route and its start and end points. Passengers offered a ride by a driver also see that car's plate and the driver's destination. After a ride is accepted, both sides see each other's name, photo, rating and live location.</li>
+<li><b>Service providers (processors):</b> Google Firebase (push notifications, crash reporting, analytics with your consent, photo storage), [HOSTING PROVIDER] (servers in [COUNTRY]), [ROUTING PROVIDER] (route calculation — receives start/end coordinates), [EMAIL PROVIDER] (sign-in codes), [MAP TILE / GEOCODING PROVIDERS] (receive the map area you view and the addresses you search). [OPTIONAL: AI ranking provider — receives only anonymous numbers such as walking distance, never names or locations.]</li>
+<li>Transfers outside the EEA: [DESCRIBE, e.g. Google LLC under the EU–US Data Privacy Framework / standard contractual clauses].</li>
+<li>Authorities, where the law requires it.</li>
+</ul>
+<p>We do not sell your data and do not use it for advertising.</p>
+
+<h2>5. Your rights</h2>
+<p>You can access, correct, export or delete your data, object to processing based on legitimate interest, and withdraw consent at any time. <b>Delete your account</b> in the app (Account &amp; security → Delete account) or at <a href="/account/delete">/account/delete</a>. For anything else write to [PRIVACY EMAIL]. You can complain to the Polish supervisory authority, Prezes Urzędu Ochrony Danych Osobowych (uodo.gov.pl).</p>
+
+<h2>6. What happens when you delete your account</h2>
+<p>We delete your profile, chats, location, planned trips, blocks, bug reports, rating comments and the pickup/drop-off points of your rides. We keep an anonymous ID linked to rides, star ratings and safety reports involving other users, so their history and safety records stay correct. It no longer identifies you.</p>
+
+<h2>7. Security</h2>
+<p>Traffic is encrypted (HTTPS). Passwords are stored as bcrypt hashes. [ADD: backups, access control.]</p>
+
+<h2>8. Changes</h2>
+<p>If we change this policy in a way that matters, the app will ask you to review and accept it again.</p>
+</body>
+</html>

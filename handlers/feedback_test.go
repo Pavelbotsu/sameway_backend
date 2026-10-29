@@ -2,7 +2,9 @@ package handlers_test
 
 import (
 	"net/http"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/Pavelbotsu/sameway_backend/testutil"
 	"github.com/stretchr/testify/assert"
@@ -51,4 +53,32 @@ func TestSubmitBugReport_RejectsEmptyFields(t *testing.T) {
 		"title": "", "body": "ok",
 	})
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// Byte-slicing a Cyrillic string at the length cap lands mid-character and
+// produces invalid UTF-8, which Postgres rejects — a 500 on a long bug report.
+// The app is fully localized into Ukrainian, so this is the common path.
+func TestSubmitBugReport_TruncatesMultiByteSafely(t *testing.T) {
+	pool, r := setupHandlers(t)
+	_, tok := testutil.CreateUser(t, pool, "passenger", "bug-utf8")
+
+	// 1 ASCII + Cyrillic: the 200-BYTE boundary now falls inside a 2-byte
+	// character, which is exactly the case that used to blow up.
+	title := "x" + strings.Repeat("д", 300)
+	body := strings.Repeat("привіт ", 900) // comfortably over the 4000 cap
+
+	w := testutil.PostJSON(t, r, "/auth/bug-report", tok, map[string]any{
+		"title": title, "body": body,
+	})
+	require.Equal(t, http.StatusOK, w.Code, "multi-byte input must not 500")
+
+	var gotTitle, gotBody string
+	require.NoError(t, pool.QueryRow(ctx(t),
+		`SELECT title, body FROM bug_reports ORDER BY created_at DESC LIMIT 1`,
+	).Scan(&gotTitle, &gotBody))
+
+	assert.True(t, utf8.ValidString(gotTitle), "stored title must be valid UTF-8")
+	assert.True(t, utf8.ValidString(gotBody), "stored body must be valid UTF-8")
+	assert.Equal(t, 200, utf8.RuneCountInString(gotTitle), "cap is in characters")
+	assert.Equal(t, 4000, utf8.RuneCountInString(gotBody))
 }

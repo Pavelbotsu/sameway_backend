@@ -321,8 +321,14 @@ func TestReapPendingRideRequests_ManualRun(t *testing.T) {
 
 	id, _, err := services.CreateRideRequest(driverID, passengerID, 50, 20)
 	require.NoError(t, err)
-	_, err = pool.Exec(ctx(t),
-		`UPDATE ride_requests SET created_at = NOW() - INTERVAL '20 minutes' WHERE id = $1`, id)
+	// The reaper ages rows off status_changed_at (how long the row has sat in
+	// its CURRENT status) rather than created_at, so that a passenger's accept
+	// gives the driver a fresh confirmation window. Backdate both.
+	_, err = pool.Exec(ctx(t), `
+		UPDATE ride_requests
+		SET created_at = NOW() - INTERVAL '20 minutes',
+		    status_changed_at = NOW() - INTERVAL '20 minutes'
+		WHERE id = $1`, id)
 	require.NoError(t, err)
 
 	// Call the reaping helper directly (the goroutine version is plumbed in main).

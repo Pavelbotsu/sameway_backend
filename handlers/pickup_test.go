@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Pavelbotsu/sameway_backend/handlers"
 	"github.com/Pavelbotsu/sameway_backend/services"
 	"github.com/Pavelbotsu/sameway_backend/testutil"
 	"github.com/stretchr/testify/assert"
@@ -229,4 +230,110 @@ func TestEndRoute_BulkCompletesInProgress(t *testing.T) {
 	require.NoError(t, pool.QueryRow(ctx(t),
 		`SELECT status FROM ride_requests WHERE id = $1`, reqID).Scan(&status))
 	assert.Equal(t, "done", status, "end-route should mark the in_progress ride as done")
+}
+
+// The 4-digit code is the only proof the two parties physically met, so a
+// guess loop must not be able to walk the 10^4 space.
+func TestPickupConfirm_BruteForceCapped(t *testing.T) {
+	reqID, code, _, paxTok := seedAcceptedRide(t)
+	r := testutil.NewTestRouter()
+
+	wrong := "0000"
+	if wrong == code {
+		wrong = "1111"
+	}
+	for i := 0; i < 5; i++ {
+		w := testutil.PostJSON(t, r, "/pickup/confirm", paxTok, map[string]any{
+			"request_id": reqID, "code": wrong,
+		})
+		require.Equal(t, http.StatusBadRequest, w.Code, "attempt %d", i+1)
+	}
+
+	// Cap reached: further guesses are refused outright...
+	w := testutil.PostJSON(t, r, "/pickup/confirm", paxTok, map[string]any{
+		"request_id": reqID, "code": wrong,
+	})
+	assert.Equal(t, http.StatusTooManyRequests, w.Code)
+
+	// ...and crucially the CORRECT code is refused too, so an attacker who
+	// happens to hit it on a later guess still gains nothing.
+	w = testutil.PostJSON(t, r, "/pickup/confirm", paxTok, map[string]any{
+		"request_id": reqID, "code": code,
+	})
+	assert.Equal(t, http.StatusTooManyRequests, w.Code)
+}
+
+// A handful of typos must not lock a genuine passenger out.
+func TestPickupConfirm_WrongThenRightUnderCap(t *testing.T) {
+	reqID, code, _, paxTok := seedAcceptedRide(t)
+	r := testutil.NewTestRouter()
+
+	wrong := "0000"
+	if wrong == code {
+		wrong = "1111"
+	}
+	for i := 0; i < 3; i++ {
+		testutil.PostJSON(t, r, "/pickup/confirm", paxTok, map[string]any{
+			"request_id": reqID, "code": wrong,
+		})
+	}
+	w := testutil.PostJSON(t, r, "/pickup/confirm", paxTok, map[string]any{
+		"request_id": reqID, "code": code,
+	})
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+// The offer window and the driver-confirmation window must be independent.
+//
+// Rows are created 'offered' and promoted to 'pending' when the passenger
+// accepts, which is when the driver's window starts. Ageing both off created_at
+// shared one budget between them: a passenger deliberating for most of the
+// offer timeout left the driver only the remainder to confirm, and the reaper
+// cancelled the row out from under them.
+func TestReaper_PendingGetsFreshWindowAfterAccept(t *testing.T) {
+	pool, _ := setupHandlers(t)
+	driverID, _ := testutil.CreateUser(t, pool, "driver", "reap-d")
+	passengerID, _ := testutil.CreateUser(t, pool, "passenger", "reap-p")
+	reqID, _, err := services.CreateRideRequest(driverID, passengerID, 50, 20)
+	require.NoError(t, err)
+
+	// An offer created well outside the timeout, which the passenger has just
+	// now accepted (status flips to 'pending' → trigger stamps status_changed_at).
+	_, err = pool.Exec(ctx(t),
+		`UPDATE ride_requests SET created_at = NOW() - INTERVAL '30 minutes' WHERE id = $1`, reqID)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx(t),
+		`UPDATE ride_requests SET status = 'pending' WHERE id = $1`, reqID)
+	require.NoError(t, err)
+
+	handlers.ReapStalePendingOnce(5)
+
+	var status string
+	require.NoError(t, pool.QueryRow(ctx(t),
+		`SELECT status FROM ride_requests WHERE id = $1`, reqID).Scan(&status))
+	assert.Equal(t, "pending", status,
+		"a just-accepted request must keep its full driver-confirm window")
+}
+
+// The flip side: a row that has genuinely sat in one status past the timeout
+// still gets reaped.
+func TestReaper_StalePendingStillExpires(t *testing.T) {
+	pool, _ := setupHandlers(t)
+	driverID, _ := testutil.CreateUser(t, pool, "driver", "reap2-d")
+	passengerID, _ := testutil.CreateUser(t, pool, "passenger", "reap2-p")
+	reqID, _, err := services.CreateRideRequest(driverID, passengerID, 50, 20)
+	require.NoError(t, err)
+
+	_, err = pool.Exec(ctx(t), `
+		UPDATE ride_requests
+		SET status = 'pending', status_changed_at = NOW() - INTERVAL '30 minutes'
+		WHERE id = $1`, reqID)
+	require.NoError(t, err)
+
+	handlers.ReapStalePendingOnce(5)
+
+	var status string
+	require.NoError(t, pool.QueryRow(ctx(t),
+		`SELECT status FROM ride_requests WHERE id = $1`, reqID).Scan(&status))
+	assert.Equal(t, "cancelled", status)
 }

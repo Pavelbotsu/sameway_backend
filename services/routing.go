@@ -48,6 +48,10 @@ func CumulativeDurations(segments []float64) []float64 {
 type RoutingClient interface {
 	GetRoadRoute(originLat, originLng, destLat, destLng float64) (*RouteResult, error)
 	GetRoute(profile string, originLat, originLng, destLat, destLng float64) (*RouteResult, error)
+	// GetRouteVia routes through every point in order (points are (lat, lng)
+	// pairs; at least two). Used by the micro-detour evaluation: origin →
+	// passenger → destination in one OSRM call.
+	GetRouteVia(profile string, points ...[2]float64) (*RouteResult, error)
 }
 
 // OSRMClient is the production implementation. BaseURL falls back to
@@ -69,6 +73,20 @@ func (c *OSRMClient) baseURL() string {
 // call would pin handler goroutines for as long as a hung upstream likes.
 var osrmDefaultClient = &http.Client{Timeout: 8 * time.Second}
 
+// osrmSem caps how many OSRM requests are in flight across the whole process.
+//
+// Per-call timeouts bound each request but say nothing about how MANY run at
+// once, and the callers fan out: every driver location update can spawn a
+// corridor re-run, every passenger ping a reverse-match, and each of those may
+// evaluate detour routes. With N active users that is unbounded concurrency
+// against a single upstream — which is how you get rate-limited (or, on a
+// self-hosted instance, how you saturate it). Requests queue here rather than
+// stampeding; the 8s client timeout still bounds total wait.
+var osrmSem = make(chan struct{}, 4)
+
+func acquireOSRM() { osrmSem <- struct{}{} }
+func releaseOSRM() { <-osrmSem }
+
 func (c *OSRMClient) http() *http.Client {
 	if c.HTTP != nil {
 		return c.HTTP
@@ -86,19 +104,34 @@ func (c *OSRMClient) GetRoadRoute(originLat, originLng, destLat, destLng float64
 // caller is expected to gracefully degrade (the pickup-route handler returns
 // an empty WKT for that leg rather than failing the whole response).
 func (c *OSRMClient) GetRoute(profile string, originLat, originLng, destLat, destLng float64) (*RouteResult, error) {
+	return c.GetRouteVia(profile, [2]float64{originLat, originLng}, [2]float64{destLat, destLng})
+}
+
+// GetRouteVia is the multi-waypoint variant (OSRM takes any number of
+// lng,lat pairs separated by ';').
+func (c *OSRMClient) GetRouteVia(profile string, points ...[2]float64) (*RouteResult, error) {
 	if profile == "" {
 		profile = "driving"
+	}
+	if len(points) < 2 {
+		return nil, fmt.Errorf("osrm: need at least 2 waypoints, got %d", len(points))
+	}
+	waypoints := make([]string, len(points))
+	for i, p := range points {
+		waypoints[i] = fmt.Sprintf("%f,%f", p[1], p[0]) // OSRM wants lng,lat
 	}
 	// annotations=duration returns per-segment travel times aligned with the
 	// full geometry, which we interpolate into ETA-to-pickup without per-
 	// candidate OSRM calls. Harmless on deployments that ignore it (the field
 	// just comes back empty and callers fall back to route-level duration).
 	url := fmt.Sprintf(
-		"%s/route/v1/%s/%f,%f;%f,%f?overview=full&geometries=geojson&annotations=duration",
-		c.baseURL(), profile, originLng, originLat, destLng, destLat,
+		"%s/route/v1/%s/%s?overview=full&geometries=geojson&annotations=duration",
+		c.baseURL(), profile, strings.Join(waypoints, ";"),
 	)
 
+	acquireOSRM()
 	resp, err := c.http().Get(url)
+	releaseOSRM()
 	if err != nil {
 		return nil, fmt.Errorf("osrm request: %w", err)
 	}
@@ -169,4 +202,9 @@ func GetRoadRoute(originLat, originLng, destLat, destLng float64) (*RouteResult,
 // GetRoadRoute; the latter remains for backward compat.
 func GetRoute(profile string, originLat, originLng, destLat, destLng float64) (*RouteResult, error) {
 	return DefaultRoutingClient.GetRoute(profile, originLat, originLng, destLat, destLng)
+}
+
+// GetRouteVia routes through every (lat, lng) point in order.
+func GetRouteVia(profile string, points ...[2]float64) (*RouteResult, error) {
+	return DefaultRoutingClient.GetRouteVia(profile, points...)
 }

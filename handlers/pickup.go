@@ -1,13 +1,19 @@
 package handlers
 
 import (
+	"crypto/subtle"
 	"errors"
+	"log"
 	"net/http"
 
 	"github.com/Pavelbotsu/sameway_backend/db"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 )
+
+// pickupMaxAttempts caps wrong-code submissions per ride. Matches
+// resetMaxAttempts in password_reset.go — same shape of control, same budget.
+const pickupMaxAttempts = 5
 
 // ConfirmPickup is the pickup-handshake endpoint. The driver knows the
 // 4-digit code (it's stamped on their `ride_response` WS payload and the
@@ -32,11 +38,12 @@ func ConfirmPickup(c *gin.Context) {
 
 	var driverID, passengerID, status string
 	var pickupCode *string
+	var attempts int
 	err := db.DB.QueryRow(ctx, `
-		SELECT driver_id, passenger_id, status, pickup_code
+		SELECT driver_id, passenger_id, status, pickup_code, pickup_attempts
 		FROM ride_requests
 		WHERE id = $1
-	`, req.RequestID).Scan(&driverID, &passengerID, &status, &pickupCode)
+	`, req.RequestID).Scan(&driverID, &passengerID, &status, &pickupCode, &attempts)
 	if errors.Is(err, pgx.ErrNoRows) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "request not found"})
 		return
@@ -72,7 +79,25 @@ func ConfirmPickup(c *gin.Context) {
 		return
 	}
 
-	if pickupCode == nil || *pickupCode == "" || *pickupCode != req.Code {
+	// Brute-force cap. The code space is only 10^4, and a successful submission
+	// is the sole evidence that the two parties physically met — uncapped, a
+	// passenger could script their way to "picked up" without ever meeting the
+	// driver, which defeats the entire handshake. Mirrors the attempts cap the
+	// reset/verification codes already carry.
+	if attempts >= pickupMaxAttempts {
+		c.JSON(http.StatusTooManyRequests,
+			gin.H{"error": "too many incorrect codes — ask the driver to restart the pickup"})
+		return
+	}
+	codeOK := pickupCode != nil && *pickupCode != "" &&
+		subtle.ConstantTimeCompare([]byte(*pickupCode), []byte(req.Code)) == 1
+	if !codeOK {
+		if _, err := db.DB.Exec(ctx,
+			`UPDATE ride_requests SET pickup_attempts = pickup_attempts + 1 WHERE id = $1`,
+			req.RequestID,
+		); err != nil {
+			log.Printf("ConfirmPickup: bump attempts for %s: %v", req.RequestID, err)
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "wrong code"})
 		return
 	}

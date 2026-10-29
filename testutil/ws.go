@@ -46,6 +46,23 @@ func ReadEvent(t testing.TB, conn *websocket.Conn, timeout time.Duration) (strin
 	return msg.Type, msg.Payload
 }
 
+// ReadEventOfType reads frames until one of the wanted type arrives (skipping
+// informational events like corridor_stats that may interleave), failing the
+// test when the deadline passes first. Skipped frames are consumed.
+func ReadEventOfType(t testing.TB, conn *websocket.Conn, timeout time.Duration, wantType string) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		remaining := time.Until(deadline)
+		require.Greater(t, remaining, time.Duration(0),
+			"no %q event within %s", wantType, timeout)
+		evtType, payload := ReadEvent(t, conn, remaining)
+		if evtType == wantType {
+			return payload
+		}
+	}
+}
+
 // ExpectNoEvent asserts that no frame arrives within `wait`. Useful for
 // idempotency tests: "a second RequestDriver should NOT emit another
 // passenger_request to the driver".

@@ -66,13 +66,18 @@ func TestAuth_BearerPrefixMissing(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
-func TestAuth_QueryTokenAccepted(t *testing.T) {
+// A token in the query string must NOT authenticate. Query strings land in
+// proxy access logs, browser history, and Referer headers, so honouring one
+// here leaked a 30-day session token on every request that used it. The
+// WebSocket handshake is the sole exception and reads `?token=` itself in
+// HandleWS, because browsers cannot set headers on a WS upgrade.
+func TestAuth_QueryTokenRejected(t *testing.T) {
 	r := newAuthedRouter()
 	tok, _ := middleware.GenerateToken("user-1", "driver")
 	req := httptest.NewRequest(http.MethodGet, "/me?token="+tok, nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
 func TestAuth_WrongSecret(t *testing.T) {

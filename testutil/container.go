@@ -65,10 +65,17 @@ func StartPostgres(t testing.TB) *pgxpool.Pool {
 // next. PostGIS extension and migration metadata are preserved.
 func ResetDB(t testing.TB, pool *pgxpool.Pool) {
 	t.Helper()
+	// password_resets is keyed by EMAIL with no FK to users, so truncating
+	// users does not cascade to it — reset codes and their attempt counters
+	// leaked between tests. email_verifications does cascade, but is listed
+	// explicitly so the set is obvious rather than incidental.
 	_, err := pool.Exec(context.Background(), `
 		TRUNCATE TABLE
 			ratings, messages, completed_trips, ride_requests,
-			planned_trips, active_passengers, active_drivers, users
+			planned_trips, active_passengers, active_drivers, users,
+			conversations, user_blocks, user_reports,
+			transit_stops, match_events,
+			password_resets, email_verifications
 		RESTART IDENTITY CASCADE
 	`)
 	require.NoError(t, err, "reset db")

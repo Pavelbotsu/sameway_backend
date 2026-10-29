@@ -1,0 +1,18 @@
+# Secrets — mounted at runtime, never baked into the image.
+.env
+.env.*
+serviceAccountKey.json
+
+# Local artifacts
+simulate.exe
+*.exe
+
+# Not needed to build the server binary
+docker/
+tests/
+testutil/
+*_test.go
+*.md
+.gitignore
+Dockerfile
+docker-compose*.yml

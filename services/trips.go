@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -68,11 +69,20 @@ func SearchPlannedTrips(originLat, originLng, destLat, destLng, radiusKm float64
 		after = &t
 	}
 
+	// Discovery response — deliberately lower fidelity than GetDriverPlannedTrips
+	// (which returns the caller's OWN trips at full precision):
+	//   - First name only. A full name plus a home address and a departure time
+	//     is a stalking kit, and the list only renders a display name anyway.
+	//   - Coordinates zeroed. The client renders origin_name/destination_name
+	//     text and never plots these, so exact departure points don't need to
+	//     leave the server to a user who hasn't matched yet.
+	// The pt.origin/destination columns are still used by the WHERE clause, so
+	// proximity search is unaffected.
 	query := fmt.Sprintf(`
-		SELECT pt.id, pt.driver_id, u.name,
+		SELECT pt.id, pt.driver_id, split_part(u.name, ' ', 1),
 		       COALESCE(u.car_color||' '||u.car_make||' '||u.car_model, ''),
-		       pt.origin_name, ST_Y(pt.origin::geometry), ST_X(pt.origin::geometry),
-		       pt.destination_name, ST_Y(pt.destination::geometry), ST_X(pt.destination::geometry),
+		       pt.origin_name, 0::float8, 0::float8,
+		       pt.destination_name, 0::float8, 0::float8,
 		       pt.seats, pt.corridor_km, pt.distance_km, pt.planned_at, pt.status, pt.created_at
 		FROM planned_trips pt
 		JOIN users u ON u.id = pt.driver_id
@@ -93,11 +103,24 @@ func SearchPlannedTrips(originLat, originLng, destLat, destLng, radiusKm float64
 	return scanPlannedTrips(rows)
 }
 
+// ErrTripNotFound is returned when the trip doesn't exist or isn't the
+// caller's. Distinguishing the two would leak whose trip an id belongs to.
+var ErrTripNotFound = errors.New("planned trip not found")
+
 func DeletePlannedTrip(tripID, driverID string) error {
-	_, err := db.DB.Exec(context.Background(),
+	// The ownership check has always been in the WHERE clause, but the result
+	// was discarded — so cancelling someone else's trip id returned success.
+	// No data leaked; the response was simply lying.
+	tag, err := db.DB.Exec(context.Background(),
 		`UPDATE planned_trips SET status = 'cancelled' WHERE id = $1 AND driver_id = $2`,
 		tripID, driverID)
-	return err
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrTripNotFound
+	}
+	return nil
 }
 
 func scanPlannedTrips(rows interface {

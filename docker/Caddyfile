@@ -1,0 +1,5 @@
+# Caddy terminates TLS (automatic Let's Encrypt for $DOMAIN) and proxies
+# everything — including the /ws WebSocket upgrade — to the backend container.
+{$DOMAIN} {
+	reverse_proxy app:8080
+}

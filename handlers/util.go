@@ -12,6 +12,23 @@ func validLatLng(lat, lng float64) bool {
 	return lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180
 }
 
+// truncateRunes caps s at n CHARACTERS, never splitting a multi-byte one.
+//
+// Slicing a Go string by index slices bytes: with any non-ASCII input (this app
+// is localized into Ukrainian, so that is the common case, not the edge case) a
+// byte-index cut can land inside a character and yield invalid UTF-8. Postgres
+// then rejects the whole INSERT.
+func truncateRunes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
+}
+
 // safeGo wraps a background task with panic recovery: `go safeGo(name, fn)()`.
 // Gin recovers panics inside HTTP handlers, but a panic in a detached
 // goroutine (corridor re-run, reaper sweep, FCM send) would crash the whole

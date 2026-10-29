@@ -23,9 +23,21 @@ func Register(c *gin.Context) {
 		Email    string `json:"email" binding:"required,email"`
 		Password string `json:"password" binding:"required,min=6"`
 		Role     string `json:"role" binding:"required,oneof=driver passenger"`
+		// Both must be explicitly true: the 18+ attestation and acceptance of
+		// the current Terms of Service + Privacy Policy. Recorded with a
+		// timestamp and version so consent can be shown later.
+		AcceptTerms  bool `json:"accept_terms"`
+		AgeConfirmed bool `json:"age_confirmed"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !req.AcceptTerms || !req.AgeConfirmed {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "you must be 18 or older and accept the terms to register",
+			"code":  "consent_required",
+		})
 		return
 	}
 
@@ -42,8 +54,10 @@ func Register(c *gin.Context) {
 
 	var id string
 	err = db.DB.QueryRow(context.Background(),
-		`INSERT INTO users (name, email, password, role) VALUES ($1,$2,$3,$4) RETURNING id`,
-		req.Name, emailAddr, string(hash), req.Role,
+		`INSERT INTO users (name, email, password, role,
+		                    terms_version, terms_accepted_at, age_confirmed_at)
+		 VALUES ($1,$2,$3,$4,$5,NOW(),NOW()) RETURNING id`,
+		req.Name, emailAddr, string(hash), req.Role, CurrentTermsVersion,
 	).Scan(&id)
 	if err != nil {
 		// Only a unique violation means "taken" — anything else is an outage
@@ -63,7 +77,7 @@ func Register(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
-	c.JSON(http.StatusCreated, gin.H{"token": token, "user_id": id, "role": req.Role, "name": req.Name, "email": emailAddr})
+	c.JSON(http.StatusCreated, gin.H{"token": token, "user_id": id, "role": req.Role, "name": req.Name, "email": emailAddr, "needs_consent": false})
 }
 
 func Login(c *gin.Context) {
@@ -79,7 +93,7 @@ func Login(c *gin.Context) {
 	emailAddr := strings.ToLower(strings.TrimSpace(req.Email))
 	var id, hash, role, name string
 	err := db.DB.QueryRow(context.Background(),
-		`SELECT id, password, role, name FROM users WHERE email = $1`,
+		`SELECT id, password, role, name FROM users WHERE email = $1 AND deleted_at IS NULL`,
 		emailAddr,
 	).Scan(&id, &hash, &role, &name)
 	if err != nil {
@@ -97,19 +111,27 @@ func Login(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"token": token, "user_id": id, "role": role, "name": name, "email": req.Email})
+	c.JSON(http.StatusOK, gin.H{
+		"token": token, "user_id": id, "role": role, "name": name, "email": req.Email,
+		// Accounts from before consent existed, or after a Terms version bump:
+		// the app shows the acceptance screen before continuing.
+		"needs_consent": needsConsent(c.Request.Context(), id),
+	})
 }
 
 func GetProfile(c *gin.Context) {
 	userID := c.GetString("user_id")
 	var u models.User
+	var allowMicroDetour bool
 	err := db.DB.QueryRow(context.Background(), `
 		SELECT id, name, email, role,
 		       COALESCE(car_make,''), COALESCE(car_model,''),
-		       COALESCE(car_color,''), COALESCE(car_plate,'')
+		       COALESCE(car_color,''), COALESCE(car_plate,''),
+		       allow_micro_detour
 		FROM users WHERE id = $1`, userID,
 	).Scan(&u.ID, &u.Name, &u.Email, &u.Role,
-		&u.CarMake, &u.CarModel, &u.CarColor, &u.CarPlate)
+		&u.CarMake, &u.CarModel, &u.CarColor, &u.CarPlate,
+		&allowMicroDetour)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
@@ -121,16 +143,17 @@ func GetProfile(c *gin.Context) {
 		userID,
 	).Scan(&avgRating, &ratingCount)
 	c.JSON(http.StatusOK, gin.H{
-		"id":           u.ID,
-		"name":         u.Name,
-		"email":        u.Email,
-		"role":         u.Role,
-		"car_make":     u.CarMake,
-		"car_model":    u.CarModel,
-		"car_color":    u.CarColor,
-		"car_plate":    u.CarPlate,
-		"avg_rating":   avgRating,
-		"rating_count": ratingCount,
+		"id":                 u.ID,
+		"name":               u.Name,
+		"email":              u.Email,
+		"role":               u.Role,
+		"car_make":           u.CarMake,
+		"car_model":          u.CarModel,
+		"car_color":          u.CarColor,
+		"car_plate":          u.CarPlate,
+		"avg_rating":         avgRating,
+		"rating_count":       ratingCount,
+		"allow_micro_detour": allowMicroDetour,
 	})
 }
 
@@ -161,10 +184,19 @@ func GetTripHistory(c *gin.Context) {
 	for rows.Next() {
 		var t tripItem
 		var completedAt time.Time
-		if err := rows.Scan(&t.ID, &t.DriverID, &t.PassengerID, &t.DistanceKm, &t.CO2SavedKg, &completedAt); err == nil {
-			t.CompletedAt = completedAt.UTC().Format(time.RFC3339)
-			trips = append(trips, t)
+		if err := rows.Scan(&t.ID, &t.DriverID, &t.PassengerID, &t.DistanceKm, &t.CO2SavedKg, &completedAt); err != nil {
+			log.Printf("GetTripHistory: scan for %s: %v", userID, err)
+			continue
 		}
+		t.CompletedAt = completedAt.UTC().Format(time.RFC3339)
+		trips = append(trips, t)
+	}
+	// Without this a connection failure mid-stream returned a silently
+	// truncated history as a 200 — the user sees "some of your trips vanished".
+	if err := rows.Err(); err != nil {
+		log.Printf("GetTripHistory: iteration for %s: %v", userID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
 	}
 	c.JSON(http.StatusOK, gin.H{"trips": trips, "user_id": userID})
 }
@@ -180,6 +212,9 @@ func UpdateProfile(c *gin.Context) {
 		CarModel *string `json:"car_model"`
 		CarColor *string `json:"car_color"`
 		CarPlate *string `json:"car_plate"`
+		// Micro-detour opt-in (Round 2 §2) — server-side because it drives
+		// matching, not just presentation.
+		AllowMicroDetour *bool `json:"allow_micro_detour"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -196,9 +231,11 @@ func UpdateProfile(c *gin.Context) {
 		    car_make  = COALESCE($2, car_make),
 		    car_model = COALESCE($3, car_model),
 		    car_color = COALESCE($4, car_color),
-		    car_plate = COALESCE($5, car_plate)
-		WHERE id = $6`,
-		req.Name, req.CarMake, req.CarModel, req.CarColor, req.CarPlate, userID,
+		    car_plate = COALESCE($5, car_plate),
+		    allow_micro_detour = COALESCE($6, allow_micro_detour)
+		WHERE id = $7`,
+		req.Name, req.CarMake, req.CarModel, req.CarColor, req.CarPlate,
+		req.AllowMicroDetour, userID,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
@@ -236,12 +273,17 @@ func SwitchRole(c *gin.Context) {
 		if err == nil {
 			for rows.Next() {
 				var reqID, passengerID string
-				if rows.Scan(&reqID, &passengerID) == nil {
-					Hub.SendToUser(passengerID, "ride_cancelled", gin.H{
-						"request_id":   reqID,
-						"cancelled_by": "driver_role_switch",
-					})
+				if err := rows.Scan(&reqID, &passengerID); err != nil {
+					log.Printf("SwitchRole: scan cancelled ride for %s: %v", userID, err)
+					continue
 				}
+				Hub.SendToUser(passengerID, "ride_cancelled", gin.H{
+					"request_id":   reqID,
+					"cancelled_by": "driver_role_switch",
+				})
+			}
+			if err := rows.Err(); err != nil {
+				log.Printf("SwitchRole: iteration for %s (rides cancelled, notifications may be incomplete): %v", userID, err)
 			}
 			rows.Close()
 		}
@@ -263,20 +305,36 @@ func SwitchRole(c *gin.Context) {
 		if err == nil {
 			for rows.Next() {
 				var reqID, driverID, wasStatus string
-				if rows.Scan(&reqID, &driverID, &wasStatus) == nil {
-					// Drivers never saw 'offered' rows — nothing to tear down.
-					if wasStatus == models.RequestOffered {
-						continue
-					}
-					Hub.SendToUser(driverID, "passenger_request_cancelled", gin.H{
-						"request_id":   reqID,
-						"cancelled_by": "passenger_role_switch",
-					})
+				if err := rows.Scan(&reqID, &driverID, &wasStatus); err != nil {
+					log.Printf("SwitchRole: scan cancelled request for %s: %v", userID, err)
+					continue
 				}
+				// Drivers never saw 'offered' rows — nothing to tear down.
+				if wasStatus == models.RequestOffered {
+					continue
+				}
+				Hub.SendToUser(driverID, "passenger_request_cancelled", gin.H{
+					"request_id":   reqID,
+					"cancelled_by": "passenger_role_switch",
+				})
+			}
+			if err := rows.Err(); err != nil {
+				log.Printf("SwitchRole: iteration for %s (requests cancelled, notifications may be incomplete): %v", userID, err)
 			}
 			rows.Close()
 		}
 		db.DB.Exec(ctx, `DELETE FROM active_passengers WHERE passenger_id = $1`, userID)
+	}
+
+	// Revoke the outgoing role's token BEFORE minting the new one (GenerateToken
+	// stamps the current version). RequireRole trusts the role claim in the JWT,
+	// so without this the pre-switch token stayed valid for its full lifetime
+	// and the user could drive both role APIs at once — registering as an active
+	// driver and an active passenger simultaneously.
+	if err := middleware.BumpTokenVersion(ctx, db.DB, userID); err != nil {
+		log.Printf("SwitchRole: bump token version for %s: %v", userID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
 	}
 
 	token, err := middleware.GenerateToken(userID, req.Role)
@@ -284,7 +342,10 @@ func SwitchRole(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"token": token, "role": req.Role, "user_id": userID})
+	c.JSON(http.StatusOK, gin.H{
+		"token": token, "role": req.Role, "user_id": userID,
+		"needs_consent": needsConsent(ctx, userID),
+	})
 }
 
 func FCMStatus(c *gin.Context) {
@@ -336,14 +397,25 @@ func ChangePassword(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
-	_, err = db.DB.Exec(context.Background(),
-		`UPDATE users SET password = $1 WHERE id = $2`, string(newHash), userID,
+	// token_version bump evicts every other outstanding session. Changing your
+	// password after a compromise has to actually log the attacker out; with
+	// stateless JWTs that only happens if the version moves.
+	_, err = db.DB.Exec(c.Request.Context(),
+		`UPDATE users SET password = $1, token_version = token_version + 1 WHERE id = $2`,
+		string(newHash), userID,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	// The caller's own token is now stale too, so hand back a fresh one rather
+	// than logging them out of the device they just used.
+	token, err := middleware.GenerateToken(userID, c.GetString("role"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "token": token})
 }
 
 func GetStats(c *gin.Context) {

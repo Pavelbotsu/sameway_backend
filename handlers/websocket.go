@@ -44,6 +44,15 @@ func hostOf(origin string) string {
 type wsClient struct {
 	conn *websocket.Conn
 	send chan []byte
+	// closeOnce guards `send` against a double close. Two paths can retire the
+	// same client — register() displacing it, and its own deferred
+	// unregister() — and closing an already-closed channel panics.
+	closeOnce sync.Once
+}
+
+// closeSend retires the client's outbound channel exactly once.
+func (c *wsClient) closeSend() {
+	c.closeOnce.Do(func() { close(c.send) })
 }
 
 type WSHub struct {
@@ -63,9 +72,18 @@ func (h *WSHub) register(userID string, client *wsClient) {
 	h.mu.Lock()
 	old := h.clients[userID]
 	h.clients[userID] = client
+	// The close happens under the SAME lock SendToUser holds while sending, so
+	// a concurrent send can never observe a half-retired client. Previously
+	// this ran after Unlock, leaving a window in which SendToUser had already
+	// read the client pointer and then sent on a channel we had just closed —
+	// a "send on closed channel" panic that surfaced as a 500 on an operation
+	// that had already committed.
+	if old != nil {
+		old.closeSend()
+	}
 	h.mu.Unlock()
 	if old != nil {
-		close(old.send)
+		// Closing the conn can block; keep it outside the lock.
 		old.conn.Close()
 	}
 }
@@ -77,20 +95,64 @@ func (h *WSHub) unregister(userID string, client *wsClient) {
 	h.mu.Lock()
 	if h.clients[userID] == client {
 		delete(h.clients, userID)
-		close(client.send)
+		client.closeSend()
 	}
 	h.mu.Unlock()
 }
 
-func (h *WSHub) SendToUser(userID, msgType string, payload interface{}) {
-	h.mu.RLock()
-	client, ok := h.clients[userID]
-	h.mu.RUnlock()
-	if !ok {
-		return
+// CloseAll retires every live connection. Called during graceful shutdown:
+// closing each client's send channel makes its writer goroutine emit a
+// CloseGoingAway frame, so clients reconnect on their normal backoff instead of
+// seeing the socket disappear. Without this, http.Server.Shutdown would simply
+// block on the long-lived WS connections until the drain deadline expired.
+func (h *WSHub) CloseAll() {
+	h.mu.Lock()
+	conns := make([]*websocket.Conn, 0, len(h.clients))
+	for userID, client := range h.clients {
+		client.closeSend()
+		conns = append(conns, client.conn)
+		delete(h.clients, userID)
 	}
+	h.mu.Unlock()
+	// Give the writers a moment to flush their close frames before the
+	// underlying conns go away.
+	time.Sleep(100 * time.Millisecond)
+	for _, c := range conns {
+		c.Close()
+	}
+}
+
+// Disconnect retires the user's live connection, if any. Used when the account
+// is deleted: the token_version bump only stops NEW connections, so without
+// this the deleted user's open socket would keep receiving events.
+func (h *WSHub) Disconnect(userID string) {
+	h.mu.Lock()
+	client := h.clients[userID]
+	if client != nil {
+		delete(h.clients, userID)
+		client.closeSend()
+	}
+	h.mu.Unlock()
+	if client != nil {
+		client.conn.Close()
+	}
+}
+
+func (h *WSHub) SendToUser(userID, msgType string, payload interface{}) {
+	// Marshal BEFORE taking the lock — no reason to hold it across encoding.
 	data, err := json.Marshal(models.WSMessage{Type: msgType, Payload: payload})
 	if err != nil {
+		return
+	}
+	// The send stays under RLock: register/unregister close `send` while
+	// holding the write lock, so holding the read lock here makes "still
+	// registered" and "channel still open" one atomic fact. The send itself is
+	// non-blocking (default branch), so this never holds the lock on a slow
+	// consumer.
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	client, ok := h.clients[userID]
+	if !ok {
 		return
 	}
 	select {
@@ -113,9 +175,16 @@ func HandleWS(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing token"})
 		return
 	}
-	userID, _, err := middleware.ParseToken(token)
+	userID, _, tv, err := middleware.ParseToken(token)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
+		return
+	}
+	// Same revocation check the HTTP middleware runs. Without it a token
+	// invalidated by a password change or role switch could still open a live
+	// event stream for the account.
+	if !middleware.TokenVersionValid(c.Request.Context(), userID, tv) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "session expired"})
 		return
 	}
 

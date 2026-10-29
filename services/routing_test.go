@@ -92,3 +92,8 @@ func (s stubRouter) GetRoute(_ string, _, _, _, _ float64) (*services.RouteResul
 	s.onCall()
 	return &services.RouteResult{}, nil
 }
+
+func (s stubRouter) GetRouteVia(_ string, _ ...[2]float64) (*services.RouteResult, error) {
+	s.onCall()
+	return &services.RouteResult{}, nil
+}

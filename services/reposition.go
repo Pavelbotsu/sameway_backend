@@ -41,9 +41,15 @@ type RepositionResult struct {
 func RepositionPickup(driverID, passengerID string) (RepositionResult, bool, error) {
 	var r RepositionResult
 	err := db.DB.QueryRow(context.Background(), `
+		-- Fractions are 3857 fractions throughout (see the CRS note in
+		-- findPassengersInCorridor): degree-space projection is anisotropic and
+		-- would pick the wrong point on any route that is not axis-aligned.
 		WITH ad AS (
-			SELECT route::geometry AS rg, route_m AS rm, ST_Length(route) AS len,
-			       ST_LineLocatePoint(route::geometry, current_location::geometry) AS dfrac,
+			SELECT route::geometry AS rg_4326,
+			       ST_Transform(route::geometry, 3857) AS rg,
+			       route_m AS rm, ST_Length(route) AS len,
+			       ST_LineLocatePoint(ST_Transform(route::geometry, 3857),
+			           ST_Transform(current_location::geometry, 3857)) AS dfrac,
 			       ST_InterpolatePoint(route_m, current_location::geometry) AS dt
 			FROM active_drivers
 			WHERE driver_id = $1 AND route IS NOT NULL AND route_m IS NOT NULL
@@ -56,8 +62,8 @@ func RepositionPickup(driverID, passengerID string) (RepositionResult, bool, err
 		),
 		params AS (
 			SELECT CASE WHEN pax.dlat IS NOT NULL
-			            THEN ST_LineLocatePoint(ad.rg,
-			                   ST_SetSRID(ST_MakePoint(pax.dlng, pax.dlat), 4326))
+			            THEN ST_LineLocatePoint(ad.rg, ST_Transform(
+			                   ST_SetSRID(ST_MakePoint(pax.dlng, pax.dlat), 4326), 3857))
 			            ELSE 1.0 END AS dropoff_frac
 			FROM ad, pax
 		)
@@ -65,18 +71,20 @@ func RepositionPickup(driverID, passengerID string) (RepositionResult, bool, err
 		FROM ad, pax, params,
 		     generate_series(0, 1, 0.01) AS f,
 		     LATERAL (
-		         SELECT ST_LineInterpolatePoint(ad.rg, f)                       AS pt,
-		                ST_LineInterpolatePoint(ad.rg, GREATEST(f - 0.005, 0))  AS p1,
-		                ST_LineInterpolatePoint(ad.rg, LEAST(f + 0.005, 1))     AS p2
+		         -- Points come straight back to 4326: they are compared against
+		         -- geography and interpolated against route_m, both 4326.
+		         SELECT ST_Transform(ST_LineInterpolatePoint(ad.rg, f), 4326)                      AS pt,
+		                ST_Transform(ST_LineInterpolatePoint(ad.rg, GREATEST(f - 0.005, 0)), 4326) AS p1,
+		                ST_Transform(ST_LineInterpolatePoint(ad.rg, LEAST(f + 0.005, 1)), 4326)    AS p2
 		     ) g,
 		     LATERAL (
 		         SELECT ST_Y(g.pt) AS lat, ST_X(g.pt) AS lng,
 		                ST_Distance(pax.loc, g.pt::geography)               AS walk_m,
 		                ST_Distance(pax.loc, g.pt::geography) / $4::float8   AS walk_s,
 		                ST_InterpolatePoint(ad.rm, g.pt) - ad.dt            AS drive_s,
-		                SIGN(params.dropoff_frac - f) * ST_Length(ST_LineSubstring(
+		                SIGN(params.dropoff_frac - f) * ST_Length(ST_Transform(ST_LineSubstring(
 		                    ad.rg, LEAST(f, params.dropoff_frac), GREATEST(f, params.dropoff_frac)
-		                )::geography)                                       AS carry_m,
+		                ), 4326)::geography)                                AS carry_m,
 		                CASE WHEN (ST_InterpolatePoint(ad.rm, g.p2) - ST_InterpolatePoint(ad.rm, g.p1)) > 0
 		                     THEN ST_Distance(g.p1::geography, g.p2::geography)
 		                          / (ST_InterpolatePoint(ad.rm, g.p2) - ST_InterpolatePoint(ad.rm, g.p1)) * 3.6

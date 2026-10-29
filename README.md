@@ -298,6 +298,55 @@ GIST indexes on `active_drivers.route`, `active_passengers.location`, and the `p
 
 ---
 
+## Deploying to a server (Docker + HTTPS)
+
+The deployable stack lives in `docker-compose.prod.yml`: PostGIS (internal
+network only), the backend (built from `Dockerfile`), and Caddy terminating
+TLS with automatic Let's Encrypt certificates. The mobile app must talk to a
+**domain over HTTPS/WSS** — Android blocks plaintext HTTP and certificates
+are not issued for bare IPs.
+
+One-time setup:
+
+1. **Domain** — create a free subdomain at [duckdns.org](https://www.duckdns.org)
+   (e.g. `sameway.duckdns.org`) and set it to the server's public IP.
+2. **Server** — any Linux VPS with Docker + the compose plugin installed and
+   ports 80/443 open.
+3. **Files** — copy this repository to the server, then next to
+   `docker-compose.prod.yml` place:
+   - `.env` — start from `.env.prod.example`; `DOMAIN`, `JWT_SECRET`
+     (`openssl rand -base64 48`) and `DB_PASSWORD` are mandatory (compose
+     refuses to boot without them);
+   - `serviceAccountKey.json` — the Firebase service account (mounted
+     read-only into the container, never baked into the image).
+
+Run:
+
+```bash
+docker compose -f docker-compose.prod.yml up -d --build
+curl https://<your-domain>/healthz   # → {"ok":true}
+```
+
+The Flutter app is pointed at the server at **build time**:
+
+```bash
+flutter build apk --release --dart-define=API_HOST=sameway.duckdns.org
+```
+
+(Without the define it falls back to the dev ngrok host.)
+
+Notes:
+
+- The stack runs `APP_ENV=dev` because routing still uses the public OSRM demo
+  server, which the prod config gate deliberately rejects. The demo server is
+  rate-limited — self-host OSRM and flip to `APP_ENV=prod` before real load.
+- `GET /healthz` (unauthenticated) reports DB reachability; the compose
+  healthcheck and any orchestrator probe use it.
+- Postgres publishes **no ports**; it is reachable only from the compose
+  network.
+
+---
+
 ## Build status
 
 `go build ./...` clean. `go vet ./...` clean. `go test ./...` clean.

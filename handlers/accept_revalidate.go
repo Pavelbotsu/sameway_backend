@@ -18,15 +18,22 @@ import (
 // and accept the driver may have driven past the pickup on a fast road. Callers
 // reject when ahead < MatchMinAheadM and mark the row expired_passed.
 func pickupStillAhead(ctx context.Context, tx pgx.Tx, requestID string) (aheadM float64, ok bool) {
+	// 3857, not raw 4326: planar maths on degrees is anisotropic, which shifts
+	// both projections along the route. Here that can flip the SIGN — the
+	// difference between "the driver is still approaching" and "the driver has
+	// passed you" — so it must match the corridor query's projection exactly.
 	err := tx.QueryRow(ctx, `
-		SELECT SIGN(p.pf - p.df) * ST_Length(ST_LineSubstring(
-		           ad.route::geometry, LEAST(p.df, p.pf), GREATEST(p.df, p.pf)
-		       )::geography)
+		SELECT SIGN(p.pf - p.df) * ST_Length(ST_Transform(ST_LineSubstring(
+		           rp.route_p, LEAST(p.df, p.pf), GREATEST(p.df, p.pf)
+		       ), 4326)::geography)
 		FROM ride_requests rr
 		JOIN active_drivers ad ON ad.driver_id = rr.driver_id
 		CROSS JOIN LATERAL (
-		    SELECT ST_LineLocatePoint(ad.route::geometry, rr.pickup_location::geometry)   AS pf,
-		           ST_LineLocatePoint(ad.route::geometry, ad.current_location::geometry) AS df
+		    SELECT ST_Transform(ad.route::geometry, 3857) AS route_p
+		) rp
+		CROSS JOIN LATERAL (
+		    SELECT ST_LineLocatePoint(rp.route_p, ST_Transform(rr.pickup_location::geometry, 3857)) AS pf,
+		           ST_LineLocatePoint(rp.route_p, ST_Transform(ad.current_location::geometry, 3857)) AS df
 		) p
 		WHERE rr.id = $1
 		  AND ad.route IS NOT NULL
@@ -57,5 +64,8 @@ func expirePassedRide(ctx context.Context, tx pgx.Tx, requestID, passengerID str
 		"request_id":   requestID,
 		"cancelled_by": "driver_passed",
 	})
+	go safeGo("match-event", func() {
+		logMatchEvent(requestID, "expired", map[string]any{"why": "driver_passed"})
+	})()
 	return true
 }

@@ -31,6 +31,8 @@ func NewTestRouter() *gin.Engine {
 		auth.PUT("/profile", middleware.Auth(), handlers.UpdateProfile)
 		auth.POST("/switch-role", middleware.Auth(), handlers.SwitchRole)
 		auth.PUT("/fcm-token", middleware.Auth(), handlers.UpdateFCMToken)
+		// Registered unconditionally here: tests run with APP_ENV unset (dev),
+		// which is exactly when main.go registers them too.
 		auth.GET("/fcm-status", middleware.Auth(), handlers.FCMStatus)
 		auth.POST("/test-notification", middleware.Auth(), handlers.TestNotification)
 		auth.GET("/stats", middleware.Auth(), handlers.GetStats)
@@ -40,11 +42,14 @@ func NewTestRouter() *gin.Engine {
 		auth.POST("/test-ai", middleware.Auth(), handlers.TestAIRanker)
 		auth.POST("/email-verify/request", middleware.Auth(), handlers.RequestEmailVerify)
 		auth.POST("/email-verify/confirm", middleware.Auth(), handlers.ConfirmEmailVerify)
+		auth.POST("/consent", middleware.Auth(), handlers.AcceptTerms)
+		auth.POST("/delete-account", middleware.Auth(), handlers.DeleteAccount)
 	}
 
 	r.POST("/ratings", middleware.Auth(), handlers.SubmitRating)
 	r.POST("/pickup/confirm", middleware.Auth(), handlers.ConfirmPickup)
 	r.GET("/pickup-route/:request_id", middleware.Auth(), handlers.GetPickupRoute)
+	r.POST("/safety/flag", middleware.Auth(), handlers.FlagRideSafety)
 
 	driver := r.Group("/driver", middleware.Auth(), middleware.RequireRole("driver"))
 	{
@@ -52,7 +57,6 @@ func NewTestRouter() *gin.Engine {
 		driver.POST("/respond", handlers.DriverRespondToRide)
 		driver.PUT("/location", handlers.UpdateLocation)
 		driver.GET("/requests", handlers.GetRequests)
-		driver.GET("/pickup-route/:request_id", handlers.GetPickupRoute)
 		driver.PUT("/status", handlers.UpdateStatus)
 		driver.POST("/dropoff/:request_id", handlers.DropoffPassenger)
 		driver.DELETE("/route", handlers.DeleteRoute)
@@ -79,14 +83,24 @@ func NewTestRouter() *gin.Engine {
 
 	chat := r.Group("/chat", middleware.Auth())
 	{
+		chat.POST("/conversations", handlers.OpenConversation)
+		chat.GET("/conversations", handlers.ListConversations)
+		chat.GET("/conversations/:id/messages", handlers.GetConversationMessages)
 		chat.POST("/send", handlers.SendMessage)
-		chat.GET("/:request_id", handlers.GetMessages)
 		chat.POST("/typing", handlers.TypingStatus)
 		chat.POST("/read", handlers.MarkRead)
+		chat.POST("/block", handlers.BlockUser)
+		chat.DELETE("/block/:user_id", handlers.UnblockUser)
+		chat.POST("/report", handlers.ReportUser)
+		chat.GET("/:request_id", handlers.GetMessages)
 	}
 
-	r.POST("/trips/search", handlers.SearchTrips)
+	r.POST("/trips/search", middleware.Auth(), handlers.SearchTrips)
 	r.GET("/promotions", handlers.GetPromotions)
+	r.GET("/legal/privacy", handlers.PrivacyPolicy)
+	r.GET("/legal/terms", handlers.TermsOfService)
+	r.GET("/account/delete", handlers.AccountDeletePage)
+	r.POST("/account/delete", handlers.AccountDeleteWeb)
 	r.GET("/ws", handlers.HandleWS)
 	return r
 }

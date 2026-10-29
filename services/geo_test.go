@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/Pavelbotsu/sameway_backend/models"
 	"github.com/Pavelbotsu/sameway_backend/services"
 	"github.com/Pavelbotsu/sameway_backend/testutil"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -397,6 +398,62 @@ func TestGetNearbyDrivers_ExcludesSelf(t *testing.T) {
 	assert.Equal(t, otherDriverID, drivers[0].DriverID)
 }
 
+// ── GetNearbyDrivers: driver reputation for the candidate list ──────────────
+
+func TestGetNearbyDrivers_IncludesRating(t *testing.T) {
+	pool := setup(t)
+	driverID, _ := testutil.CreateUser(t, pool, "driver", "d1")
+	callerID, _ := testutil.CreateUser(t, pool, "passenger", "p1")
+	raterA, _ := testutil.CreateUser(t, pool, "passenger", "ra")
+	raterB, _ := testutil.CreateUser(t, pool, "passenger", "rb")
+
+	routeWKT := testutil.LineStringWKT(
+		[2]float64{20.00, 50.00}, [2]float64{20.10, 50.00})
+	testutil.CreateActiveDriver(t, pool, driverID,
+		testutil.LatLng{Lat: 50, Lng: 20}, testutil.LatLng{Lat: 50, Lng: 20.10}, routeWKT)
+
+	// ratings.ride_request_id is NOT NULL and UNIQUE per (rater, ride), so each
+	// rating needs its own completed ride behind it.
+	for _, r := range []struct {
+		rater string
+		stars int
+	}{{raterA, 5}, {raterB, 4}} {
+		var rideID string
+		require.NoError(t, pool.QueryRow(context.Background(),
+			`INSERT INTO ride_requests (driver_id, passenger_id, pickup_location, status)
+			 VALUES ($1, $2, ST_MakePoint(20, 50)::geography, 'done') RETURNING id`,
+			driverID, r.rater).Scan(&rideID))
+		_, err := pool.Exec(context.Background(),
+			`INSERT INTO ratings (rater_id, rated_id, ride_request_id, stars)
+			 VALUES ($1, $2, $3, $4)`,
+			r.rater, driverID, rideID, r.stars)
+		require.NoError(t, err)
+	}
+
+	drivers, err := services.GetNearbyDrivers(50.0, 20.0, 5.0, 0, 0, 0, callerID)
+	require.NoError(t, err)
+	require.Len(t, drivers, 1)
+	assert.InDelta(t, 4.5, drivers[0].DriverAvgRating, 0.001)
+	assert.Equal(t, 2, drivers[0].DriverRatingCount)
+}
+
+// An unrated driver must come back as 0/0, not NULL — the client renders a
+// "new" badge off the count and would otherwise show a 0.0-star average.
+func TestGetNearbyDrivers_UnratedDriverIsZeroNotNull(t *testing.T) {
+	pool := setup(t)
+	driverID, _ := testutil.CreateUser(t, pool, "driver", "d1")
+	callerID, _ := testutil.CreateUser(t, pool, "passenger", "p1")
+	testutil.CreateActiveDriver(t, pool, driverID,
+		testutil.LatLng{Lat: 50, Lng: 20}, testutil.LatLng{Lat: 50, Lng: 20.10},
+		testutil.LineStringWKT([2]float64{20.00, 50.00}, [2]float64{20.10, 50.00}))
+
+	drivers, err := services.GetNearbyDrivers(50.0, 20.0, 5.0, 0, 0, 0, callerID)
+	require.NoError(t, err)
+	require.Len(t, drivers, 1)
+	assert.Equal(t, 0, drivers[0].DriverRatingCount)
+	assert.Zero(t, drivers[0].DriverAvgRating)
+}
+
 // ── GetDriverRequests filters + joins ───────────────────────────────────────
 
 func TestGetDriverRequests_FiltersStatus(t *testing.T) {
@@ -434,6 +491,94 @@ func TestGetDriverRequests_JoinsName(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, reqs, 1)
 	assert.Equal(t, "Bob", reqs[0].PassengerName)
+}
+
+// ── GetDriverRequests: pre-accept drop-off disclosure ───────────────────────
+//
+// The driver used to see only a name and a rating before committing a seat.
+// These cover the on-read projection that tells them where the passenger gets
+// out and how far they ride.
+
+// seedRouteAndRequest builds a due-east route from (50, 20.00) to (50, 20.10)
+// with a passenger picked up at 20.02, optionally declaring a destination.
+func seedRouteAndRequest(t *testing.T, dest *testutil.LatLng) (string, []models.RideRequest) {
+	t.Helper()
+	pool := setup(t)
+	driverID, _ := testutil.CreateUser(t, pool, "driver", "d1")
+	passengerID, _ := testutil.CreateUser(t, pool, "passenger", "p1")
+
+	require.NoError(t, services.UpsertActiveDriver(driverID,
+		testutil.LineStringWKT([2]float64{20.00, 50.00}, [2]float64{20.10, 50.00}),
+		services.BuildMeasuredLineEWKT([][2]float64{{20.00, 50.00}, {20.10, 50.00}}, nil),
+		50.0, 20.0, 50.0, 20.10, 1.0, 3,
+	))
+	testutil.CreateActivePassenger(t, pool, passengerID,
+		testutil.LatLng{Lat: 50.0, Lng: 20.02}, dest)
+
+	_, _, err := services.CreateRideRequest(driverID, passengerID, 50.0, 20.02)
+	require.NoError(t, err)
+
+	reqs, err := services.GetDriverRequests(driverID)
+	require.NoError(t, err)
+	return driverID, reqs
+}
+
+func TestGetDriverRequests_ProjectsDropoffOntoRoute(t *testing.T) {
+	// Destination sits OFF the route (north of it) at lng 20.06. The driver
+	// must be shown where they'd actually stop — the projection back onto
+	// their own line — not the passenger's true destination.
+	_, reqs := seedRouteAndRequest(t, &testutil.LatLng{Lat: 50.02, Lng: 20.06})
+	require.Len(t, reqs, 1)
+	r := reqs[0]
+
+	require.NotNil(t, r.DropoffLat, "driver must see where the passenger gets out")
+	require.NotNil(t, r.DropoffLng)
+	assert.InDelta(t, 20.06, *r.DropoffLng, 0.002, "drop-off projects along the route")
+	assert.InDelta(t, 50.00, *r.DropoffLat, 0.002,
+		"drop-off must sit ON the route, not at the passenger's off-route destination")
+}
+
+func TestGetDriverRequests_CarryIsPickupToDropoff(t *testing.T) {
+	// Pickup at 20.02, dropoff projects to 20.06 => ~0.04 deg of longitude at
+	// lat 50, which is ~2.9 km. Critically it must NOT be measured from the
+	// driver's origin at 20.00.
+	_, reqs := seedRouteAndRequest(t, &testutil.LatLng{Lat: 50.0, Lng: 20.06})
+	require.Len(t, reqs, 1)
+	require.NotNil(t, reqs[0].CarryM)
+	carry := *reqs[0].CarryM
+	assert.InDelta(t, 2860, carry, 250,
+		"carry spans pickup->dropoff (~0.04 deg lng at lat 50)")
+	assert.Less(t, carry, 4000.0,
+		"carry measured from the driver's origin instead of the pickup would be ~4.3 km")
+}
+
+// corridor_weak: matched on heading alone. There is nothing to project, and
+// the UI must say "no destination set" rather than invent one.
+func TestGetDriverRequests_NoDestinationYieldsNullDropoff(t *testing.T) {
+	_, reqs := seedRouteAndRequest(t, nil)
+	require.Len(t, reqs, 1)
+	assert.Nil(t, reqs[0].DropoffLat)
+	assert.Nil(t, reqs[0].DropoffLng)
+	assert.Nil(t, reqs[0].CarryM)
+}
+
+// A driver with no active route (deleted it while a request was outstanding)
+// must still return the request — just without the geometry.
+func TestGetDriverRequests_SurvivesMissingRoute(t *testing.T) {
+	pool := setup(t)
+	driverID, _ := testutil.CreateUser(t, pool, "driver", "d1")
+	passengerID, _ := testutil.CreateUser(t, pool, "passenger", "p1")
+	testutil.CreateActivePassenger(t, pool, passengerID,
+		testutil.LatLng{Lat: 50.0, Lng: 20.02},
+		&testutil.LatLng{Lat: 50.0, Lng: 20.06})
+	_, _, err := services.CreateRideRequest(driverID, passengerID, 50.0, 20.02)
+	require.NoError(t, err)
+
+	reqs, err := services.GetDriverRequests(driverID)
+	require.NoError(t, err)
+	require.Len(t, reqs, 1, "the request must not vanish just because the route did")
+	assert.Nil(t, reqs[0].DropoffLat)
+	assert.Nil(t, reqs[0].CarryM)
 }
 
 // ── UpsertActiveDriver seeds current_location ───────────────────────────────

@@ -1,5 +1,13 @@
-version: '3.8'
-
+# LOCAL DEV ONLY — the backend itself runs on the host via `go run .`.
+#
+# Ports are published to localhost so the host process can reach them. Do not
+# run this file on a public server: use docker-compose.prod.yml, which keeps the
+# database off the network entirely.
+#
+# A redis service used to be declared here. Nothing in the Go code ever used it
+# — the two throttles that mention Redis (handlers/livelocation.go,
+# handlers/driver.go) are in-process maps and say so — so it was a container
+# publishing 6379 for no reason.
 services:
   db:
     image: postgis/postgis:15-3.3
@@ -9,15 +17,9 @@ services:
       - POSTGRES_PASSWORD=password
       - POSTGRES_DB=rideshare
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-
-  redis:
-    image: redis:7-alpine
-    container_name: rideshare-redis
-    ports:
-      - "6379:6379"
 
 volumes:
   postgres_data:

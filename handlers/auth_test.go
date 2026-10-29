@@ -43,6 +43,7 @@ func TestRegister_Valid(t *testing.T) {
 	w := testutil.PostJSON(t, r, "/auth/register", "", map[string]any{
 		"name": "Alice", "email": "alice@x.com",
 		"password": "secret123", "role": "passenger",
+		"accept_terms": true, "age_confirmed": true,
 	})
 	assert.Equal(t, http.StatusCreated, w.Code)
 	var body map[string]any
@@ -56,6 +57,7 @@ func TestRegister_DuplicateEmail(t *testing.T) {
 	body := map[string]any{
 		"name": "A", "email": "dup@x.com",
 		"password": "secret123", "role": "passenger",
+		"accept_terms": true, "age_confirmed": true,
 	}
 	w1 := testutil.PostJSON(t, r, "/auth/register", "", body)
 	require.Equal(t, http.StatusCreated, w1.Code)
@@ -68,6 +70,7 @@ func TestRegister_BadPassword(t *testing.T) {
 	w := testutil.PostJSON(t, r, "/auth/register", "", map[string]any{
 		"name": "A", "email": "a@x.com",
 		"password": "short", "role": "passenger",
+		"accept_terms": true, "age_confirmed": true,
 	})
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
@@ -77,6 +80,7 @@ func TestRegister_BadEmail(t *testing.T) {
 	w := testutil.PostJSON(t, r, "/auth/register", "", map[string]any{
 		"name": "A", "email": "not-an-email",
 		"password": "secret123", "role": "driver",
+		"accept_terms": true, "age_confirmed": true,
 	})
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
@@ -88,6 +92,7 @@ func TestLogin_GoodPassword(t *testing.T) {
 	register := testutil.PostJSON(t, r, "/auth/register", "", map[string]any{
 		"name": "A", "email": "login@x.com",
 		"password": "secret123", "role": "driver",
+		"accept_terms": true, "age_confirmed": true,
 	})
 	require.Equal(t, http.StatusCreated, register.Code)
 
@@ -105,6 +110,7 @@ func TestLogin_BadPassword(t *testing.T) {
 	testutil.PostJSON(t, r, "/auth/register", "", map[string]any{
 		"name": "A", "email": "login2@x.com",
 		"password": "secret123", "role": "driver",
+		"accept_terms": true, "age_confirmed": true,
 	})
 	w := testutil.PostJSON(t, r, "/auth/login", "", map[string]any{
 		"email": "login2@x.com", "password": "WRONG",
@@ -210,4 +216,60 @@ func TestFCMStatus_DisabledInTests(t *testing.T) {
 	w := testutil.GetJSON(t, r, "/auth/fcm-status", tok)
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), `"fcm_enabled":false`)
+}
+
+// ── Session revocation (users.token_version) ───────────────────────────────
+
+// Changing a password must evict every OTHER session. Stateless JWTs stay
+// valid for their full lifetime otherwise, so "someone has my account, let me
+// change my password" would not actually lock the attacker out.
+func TestChangePassword_RevokesOldTokens(t *testing.T) {
+	pool, r := setupHandlers(t)
+	_, tok := testutil.CreateUser(t, pool, "passenger", "rev-1")
+
+	// Token works before the change.
+	require.Equal(t, http.StatusOK, testutil.GetJSON(t, r, "/auth/profile", tok).Code)
+
+	w := testutil.PostJSON(t, r, "/auth/change-password", tok, map[string]any{
+		"current_password": "test-pass", // testutil.CreateUser's fixed password
+		"new_password":     "brand-new-pass",
+	})
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// The old token is now dead...
+	assert.Equal(t, http.StatusUnauthorized,
+		testutil.GetJSON(t, r, "/auth/profile", tok).Code,
+		"pre-change token must not survive a password change")
+
+	// ...and the response carried a fresh one so the caller stays signed in.
+	var body map[string]any
+	testutil.DecodeJSON(t, w, &body)
+	fresh, _ := body["token"].(string)
+	require.NotEmpty(t, fresh, "change-password must return a replacement token")
+	assert.Equal(t, http.StatusOK, testutil.GetJSON(t, r, "/auth/profile", fresh).Code)
+}
+
+// RequireRole trusts the role claim in the JWT, so the pre-switch token has to
+// die — otherwise a user holds a valid driver token AND a valid passenger
+// token at once and can drive both role APIs simultaneously.
+func TestSwitchRole_RevokesOldRoleToken(t *testing.T) {
+	pool, r := setupHandlers(t)
+	_, driverTok := testutil.CreateUser(t, pool, "driver", "rev-2")
+
+	require.Equal(t, http.StatusOK, testutil.GetJSON(t, r, "/driver/requests", driverTok).Code)
+
+	w := testutil.PostJSON(t, r, "/auth/switch-role", driverTok,
+		map[string]any{"role": "passenger"})
+	require.Equal(t, http.StatusOK, w.Code)
+
+	assert.Equal(t, http.StatusUnauthorized,
+		testutil.GetJSON(t, r, "/driver/requests", driverTok).Code,
+		"old driver token must not still reach driver endpoints")
+
+	var body map[string]any
+	testutil.DecodeJSON(t, w, &body)
+	newTok, _ := body["token"].(string)
+	require.NotEmpty(t, newTok)
+	assert.Equal(t, http.StatusOK,
+		testutil.GetJSON(t, r, "/passenger/my-requests", newTok).Code)
 }

@@ -13,6 +13,10 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// maxNearbyRadiusKm bounds /passenger/nearby-drivers server-side. The client
+// asks for 10; anything much beyond that is a scrape, not a map view.
+const maxNearbyRadiusKm = 15
+
 func PassengerUpdateLocation(c *gin.Context) {
 	// Pointer coords: `required` on plain floats rejects legal zero values
 	// (equator / Greenwich meridian).
@@ -33,6 +37,13 @@ func PassengerUpdateLocation(c *gin.Context) {
 	if err := services.UpsertActivePassenger(passengerID, lat, lng); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
+	}
+
+	// Reverse trigger (§5): a passenger appearing/moving must be able to
+	// reach parked drivers whose own location updates may never come.
+	// Throttled per passenger; runs detached so the ping stays fast.
+	if shouldRerunPassengerMatch(passengerID, lat, lng) {
+		go safeGo("reverseMatchForPassenger", func() { reverseMatchForPassenger(passengerID) })()
 	}
 
 	// Live location: relay to the counterparty driver(s) of any active ride
@@ -108,6 +119,7 @@ func respondDecline(c *gin.Context, passengerID, requestID string) {
 		"request_id":             requestID,
 		"status":                 "declined",
 	})
+	go safeGo("match-event", func() { logMatchEvent(requestID, "passenger_declined", nil) })()
 
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -129,17 +141,21 @@ func respondAccept(c *gin.Context, passengerID, requestID string) {
 	defer tx.Rollback(ctx) // safe no-op after commit
 
 	// Lock the offered row; capture the driver + projected pickup for the
-	// driver's incoming-request UI.
-	var driverID string
+	// driver's incoming-request UI, plus the Round-2 labeling so the
+	// driver's notification discloses relay/detour terms.
+	var driverID, matchKind string
 	var pickupLat, pickupLng float64
+	var detourAddedM, detourAddedS *float64
 	err = tx.QueryRow(ctx, `
 		SELECT driver_id,
 		       COALESCE(ST_Y(pickup_location::geometry), 0),
-		       COALESCE(ST_X(pickup_location::geometry), 0)
+		       COALESCE(ST_X(pickup_location::geometry), 0),
+		       match_kind, detour_added_m, detour_added_s
 		FROM ride_requests
 		WHERE id = $1 AND passenger_id = $2 AND status = 'offered'
 		FOR UPDATE
-	`, requestID, passengerID).Scan(&driverID, &pickupLat, &pickupLng)
+	`, requestID, passengerID).Scan(&driverID, &pickupLat, &pickupLng,
+		&matchKind, &detourAddedM, &detourAddedS)
 	if errors.Is(err, pgx.ErrNoRows) {
 		c.JSON(http.StatusConflict, gin.H{"error": "offer no longer available"})
 		return
@@ -181,7 +197,7 @@ func respondAccept(c *gin.Context, passengerID, requestID string) {
 		`SELECT COALESCE(fcm_token,'') FROM users WHERE id = $1`, driverID,
 	).Scan(&driverFCM)
 	services.NotifyDriverPassengerRequested(driverFCM, passengerID)
-	Hub.SendToUser(driverID, "passenger_request", gin.H{
+	requestPayload := gin.H{
 		"request_id":             requestID,
 		"passenger_id":           passengerID,
 		"passenger_name":         passengerName,
@@ -190,7 +206,16 @@ func respondAccept(c *gin.Context, passengerID, requestID string) {
 		"passenger_rating_count": count,
 		"pickup_lat":             pickupLat,
 		"pickup_lng":             pickupLng,
-	})
+		"match_kind":             matchKind,
+	}
+	if detourAddedM != nil && detourAddedS != nil {
+		// Never silent: the driver sees the delta on the incoming request,
+		// before they confirm the seat.
+		requestPayload["detour_added_m"] = *detourAddedM
+		requestPayload["detour_added_s"] = *detourAddedS
+	}
+	Hub.SendToUser(driverID, "passenger_request", requestPayload)
+	go safeGo("match-event", func() { logMatchEvent(requestID, "passenger_accepted", nil) })()
 
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -293,6 +318,16 @@ func NearbyDrivers(c *gin.Context) {
 	if req.RadiusKm <= 0 {
 		req.RadiusKm = 10
 	}
+	// Hard ceiling regardless of what the client asks for. The binding tag
+	// allowed 100 km, which turned one request into a region-wide scrape of the
+	// active-driver pool and a very expensive PostGIS scan. The app itself only
+	// ever asks for 10.
+	if req.RadiusKm > maxNearbyRadiusKm {
+		req.RadiusKm = maxNearbyRadiusKm
+	}
+	if req.DestRadiusKm > maxNearbyRadiusKm {
+		req.DestRadiusKm = maxNearbyRadiusKm
+	}
 	callerID := c.GetString("user_id")
 	drivers, err := services.GetNearbyDrivers(*req.Lat, *req.Lng, req.RadiusKm, req.DestLat, req.DestLng, req.DestRadiusKm, callerID)
 	if err != nil {
@@ -341,24 +376,35 @@ func RequestDriver(c *gin.Context) {
 	// you" from "position unknown" for the error message.
 	var pickupLat, pickupLng, walkM float64
 	var aheadM *float64
+	// Projections run through 3857 rather than raw 4326 — planar maths on
+	// degrees is anisotropic (a degree of longitude is only cos(lat) as long as
+	// a degree of latitude), which drags the projected pickup along the route
+	// and inflates the measured walk. See the CRS note in
+	// services.findPassengersInCorridor; these gates must agree with it, or a
+	// passenger gets offered a ride the corridor query would have rejected (or
+	// vice versa).
 	err := db.DB.QueryRow(ctx, `
 		SELECT ST_Y(p.geom::geometry), ST_X(p.geom::geometry),
 		       ST_Distance(ap.location, p.geom),
 		       CASE WHEN ad.current_location IS NOT NULL
 		             AND ad.current_location_at > NOW() - make_interval(secs => $3::float8)
-		            THEN SIGN(f.pf - f.df) * ST_Length(ST_LineSubstring(
-		                     ad.route::geometry, LEAST(f.df, f.pf), GREATEST(f.df, f.pf)
-		                 )::geography)
+		            THEN SIGN(f.pf - f.df) * ST_Length(ST_Transform(ST_LineSubstring(
+		                     rp.route_p, LEAST(f.df, f.pf), GREATEST(f.df, f.pf)
+		                 ), 4326)::geography)
 		            END
 		FROM active_passengers ap
 		JOIN active_drivers ad ON ad.driver_id = $2
 		CROSS JOIN LATERAL (
-		    SELECT ST_ClosestPoint(ad.route::geometry, ap.location::geometry)::geography AS geom
+		    SELECT ST_Transform(ad.route::geometry, 3857)     AS route_p,
+		           ST_Transform(ap.location::geometry, 3857)  AS pax_p
+		) rp
+		CROSS JOIN LATERAL (
+		    SELECT ST_Transform(ST_ClosestPoint(rp.route_p, rp.pax_p), 4326)::geography AS geom
 		) p
 		CROSS JOIN LATERAL (
-		    SELECT ST_LineLocatePoint(ad.route::geometry, ap.location::geometry) AS pf,
-		           ST_LineLocatePoint(ad.route::geometry,
-		               COALESCE(ad.current_location, ad.origin)::geometry)       AS df
+		    SELECT ST_LineLocatePoint(rp.route_p, rp.pax_p) AS pf,
+		           ST_LineLocatePoint(rp.route_p, ST_Transform(
+		               COALESCE(ad.current_location, ad.origin)::geometry, 3857)) AS df
 		) f
 		WHERE ap.passenger_id = $1 AND ad.route IS NOT NULL
 	`, passengerID, req.DriverID, config.C.MatchLocFreshS).Scan(&pickupLat, &pickupLng, &walkM, &aheadM)
@@ -389,10 +435,24 @@ func RequestDriver(c *gin.Context) {
 		return
 	}
 
-	// Only notify the driver if this is a genuinely new request. If an active
-	// row already exists (the driver already saw this passenger via a corridor
-	// match), the passenger is just confirming on their side — the driver's
-	// UI is already up-to-date and a second event would confuse it.
+	// An active 'offered' row may exist for this pair WITHOUT the driver
+	// knowing (corridor offers — including reverse-trigger ones — live on
+	// the passenger's screen only). An explicit request is the passenger
+	// saying yes, so promote it to 'pending' and notify the driver, exactly
+	// like the offer-accept path. The ahead/freshness re-validation already
+	// ran above. Rows already pending/accepted stay silent — the driver's
+	// UI is up-to-date and a second event would confuse it.
+	if !isNew {
+		var promoted bool
+		if err := db.DB.QueryRow(ctx, `
+			UPDATE ride_requests SET status = 'pending'
+			WHERE id = $1 AND status = 'offered'
+			RETURNING true
+		`, requestID).Scan(&promoted); err == nil && promoted {
+			isNew = true
+		}
+	}
+
 	if isNew {
 		var passengerName string
 		var passengerAvgRating float64
@@ -470,6 +530,9 @@ func PassengerCancelRide(c *gin.Context) {
 		"request_id":   requestID,
 		"cancelled_by": "passenger",
 	})
+	go safeGo("match-event", func() {
+		logMatchEvent(requestID, "cancelled", map[string]any{"by": "passenger"})
+	})()
 
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -516,6 +579,12 @@ func PassengerSearch(c *gin.Context) {
 		return
 	}
 
+	// A destination (un)set changes matching inputs without the passenger
+	// moving, so gate on the time floor only (not the movement floor).
+	if shouldRerunPassengerMatchTimeOnly(passengerID, originLat, originLng) {
+		go safeGo("reverseMatchForPassenger", func() { reverseMatchForPassenger(passengerID) })()
+	}
+
 	routeWkt := ""
 	distanceKm := 0.0
 	if r, err := services.GetRoadRoute(originLat, originLng, destLat, destLng); err == nil {
@@ -554,6 +623,9 @@ func PassengerCancelPendingRequest(c *gin.Context) {
 		"request_id":   requestID,
 		"cancelled_by": "passenger",
 	})
+	go safeGo("match-event", func() {
+		logMatchEvent(requestID, "cancelled", map[string]any{"by": "passenger"})
+	})()
 
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

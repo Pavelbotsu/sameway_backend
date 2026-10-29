@@ -99,9 +99,12 @@ func TestForgotPassword_UnknownEmail_Returns200_NoSend(t *testing.T) {
 	cap.mu.Unlock()
 }
 
-func TestForgotPassword_RateLimited(t *testing.T) {
+// The resend cooldown must still suppress the second email, but must NOT be
+// observable in the response: a 429 here (and 200 for an unknown address) made
+// the endpoint an account-existence oracle.
+func TestForgotPassword_RateLimitedSilently(t *testing.T) {
 	pool, r := setupHandlers(t)
-	installSender(t)
+	cap := installSender(t)
 	_, _ = testutil.CreateUser(t, pool, "passenger", "rate-1")
 
 	w := testutil.PostJSON(t, r, "/auth/forgot-password", "",
@@ -110,7 +113,90 @@ func TestForgotPassword_RateLimited(t *testing.T) {
 
 	w = testutil.PostJSON(t, r, "/auth/forgot-password", "",
 		map[string]any{"email": "rate-1@test.local"})
-	assert.Equal(t, http.StatusTooManyRequests, w.Code)
+	assert.Equal(t, http.StatusOK, w.Code, "cooldown must not leak via status code")
+
+	// Exactly one mail: the cooldown is still enforced, just silently.
+	time.Sleep(300 * time.Millisecond)
+	cap.mu.Lock()
+	defer cap.mu.Unlock()
+	assert.Equal(t, 1, cap.calls, "second request inside the cooldown must not send")
+}
+
+// The response to a known and an unknown address must be indistinguishable,
+// including on the repeat request that trips the cooldown.
+func TestForgotPassword_NoAccountEnumeration(t *testing.T) {
+	pool, r := setupHandlers(t)
+	installSender(t)
+	_, _ = testutil.CreateUser(t, pool, "passenger", "enum-known")
+
+	for i := 0; i < 2; i++ {
+		known := testutil.PostJSON(t, r, "/auth/forgot-password", "",
+			map[string]any{"email": "enum-known@test.local"})
+		unknown := testutil.PostJSON(t, r, "/auth/forgot-password", "",
+			map[string]any{"email": "enum-nobody@test.local"})
+		assert.Equal(t, known.Code, unknown.Code,
+			"status must not distinguish existing from missing accounts (pass %d)", i)
+		assert.JSONEq(t, known.Body.String(), unknown.Body.String(),
+			"body must not distinguish existing from missing accounts (pass %d)", i)
+	}
+}
+
+// A fresh code must come with a fresh attempt budget. Without the attempts
+// reset, burning the cap once locked the address out of password reset
+// permanently — including for the legitimate owner.
+func TestForgotPassword_NewCodeClearsAttempts(t *testing.T) {
+	pool, r := setupHandlers(t)
+	cap := installSender(t)
+	_, _ = testutil.CreateUser(t, pool, "passenger", "lock-1")
+
+	require.Equal(t, http.StatusOK, testutil.PostJSON(t, r, "/auth/forgot-password", "",
+		map[string]any{"email": "lock-1@test.local"}).Code)
+
+	// Burn the attempt cap with wrong codes (handlers.resetMaxAttempts == 5;
+	// unexported, and this is an external test package).
+	for i := 0; i < 5; i++ {
+		testutil.PostJSON(t, r, "/auth/reset-password", "", map[string]any{
+			"email": "lock-1@test.local", "code": "000000", "new_password": "newpass123",
+		})
+	}
+	w := testutil.PostJSON(t, r, "/auth/reset-password", "", map[string]any{
+		"email": "lock-1@test.local", "code": "000000", "new_password": "newpass123",
+	})
+	require.Equal(t, http.StatusTooManyRequests, w.Code, "cap should be reached")
+
+	// Age the row past the resend cooldown, then request a fresh code.
+	_, err := pool.Exec(context.Background(),
+		`UPDATE password_resets SET created_at = NOW() - INTERVAL '5 minutes' WHERE email = $1`,
+		"lock-1@test.local")
+	require.NoError(t, err)
+
+	cap.mu.Lock()
+	cap.calls, cap.body = 0, ""
+	cap.mu.Unlock()
+
+	require.Equal(t, http.StatusOK, testutil.PostJSON(t, r, "/auth/forgot-password", "",
+		map[string]any{"email": "lock-1@test.local"}).Code)
+
+	deadline := time.Now().Add(2 * time.Second)
+	var code string
+	for time.Now().Before(deadline) {
+		cap.mu.Lock()
+		if cap.calls > 0 {
+			code = extractCode(cap.body)
+		}
+		cap.mu.Unlock()
+		if code != "" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	require.NotEmpty(t, code, "expected a fresh code to be mailed")
+
+	// The new code must work — proving attempts was cleared, not carried over.
+	w = testutil.PostJSON(t, r, "/auth/reset-password", "", map[string]any{
+		"email": "lock-1@test.local", "code": code, "new_password": "newpass123",
+	})
+	assert.Equal(t, http.StatusOK, w.Code, "a fresh code must not inherit the old attempt count")
 }
 
 func TestResetPassword_HappyPath(t *testing.T) {

@@ -33,12 +33,14 @@ func SubmitBugReport(c *gin.Context) {
 		return
 	}
 	// Hard caps so a misbehaving client can't blow up the table.
-	if len(title) > 200 {
-		title = title[:200]
-	}
-	if len(body) > 4000 {
-		body = body[:4000]
-	}
+	//
+	// Truncate by RUNES, not bytes. len() counts bytes, and Cyrillic is 2
+	// bytes per character (emoji 4) — the app ships full Ukrainian
+	// localization, so a byte slice regularly landed mid-character. That
+	// produces invalid UTF-8, which Postgres rejects outright ("invalid byte
+	// sequence for encoding UTF8"), turning a long bug report into a 500.
+	title = truncateRunes(title, 200)
+	body = truncateRunes(body, 4000)
 	userID := c.GetString("user_id")
 	_, err := db.DB.Exec(c.Request.Context(), `
 		INSERT INTO bug_reports (user_id, title, body, app_version, device_info)

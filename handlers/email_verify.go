@@ -71,7 +71,10 @@ func RequestEmailVerify(c *gin.Context) {
 		ON CONFLICT (user_id) DO UPDATE SET
 			code = EXCLUDED.code,
 			expires_at = EXCLUDED.expires_at,
-			created_at = NOW()
+			created_at = NOW(),
+			-- Same reset as password_resets: a fresh code must come with a
+			-- fresh attempt budget, or the cap locks the user out permanently.
+			attempts = 0
 	`, userID, code, expiresAt)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})

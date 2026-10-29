@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"log"
 	"net/http"
 	"strings"
@@ -77,6 +78,10 @@ func CancelPlannedTrip(c *gin.Context) {
 	tripID := c.Param("id")
 	driverID := c.GetString("user_id")
 	if err := services.DeletePlannedTrip(tripID, driverID); err != nil {
+		if errors.Is(err, services.ErrTripNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "trip not found"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}

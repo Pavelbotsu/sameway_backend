@@ -1,0 +1,94 @@
+# Production stack: PostGIS + backend + Caddy (automatic HTTPS).
+#
+#   1. Copy .env.prod.example to .env and fill in the values.
+#   2. Put serviceAccountKey.json next to this file (never in the image).
+#   3. docker compose -f docker-compose.prod.yml up -d --build
+#
+# The ${VAR:?...} interpolations make compose refuse to start with missing
+# secrets — even though the app runs with APP_ENV=dev (public OSRM), insecure
+# defaults can never reach the server.
+
+services:
+  db:
+    image: postgis/postgis:15-3.3
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${DB_PASSWORD:?set DB_PASSWORD in .env}
+      - POSTGRES_DB=rideshare
+    # NOTE: no published ports — the database is reachable only from the
+    # compose network. Never expose 5432 on a public server.
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d rideshare"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # prod: enforces a real JWT_SECRET and keeps diagnostic endpoints off.
+      # The public-OSRM check is opted out of explicitly below rather than by
+      # running the whole server in dev mode — running prod as "dev" also
+      # disabled release logging and let JWTs reach the container log.
+      - APP_ENV=prod
+      # Short tester round only. Remove this and point OSRM_BASE_URL at a
+      # self-hosted instance before any real load: the demo server is
+      # rate-limited and its usage policy prohibits production traffic.
+      - ALLOW_PUBLIC_OSRM=true
+      - PORT=8080
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=${DB_PASSWORD:?set DB_PASSWORD in .env}
+      - DB_NAME=rideshare
+      - JWT_SECRET=${JWT_SECRET:?set JWT_SECRET in .env}
+      - JWT_TTL_HOURS=${JWT_TTL_HOURS:-720}
+      - FIREBASE_CREDENTIALS_PATH=/secrets/serviceAccountKey.json
+      - OSRM_BASE_URL=${OSRM_BASE_URL:-http://router.project-osrm.org}
+      # Matching: how long a driver's last GPS fix stays usable. Every match
+      # path (corridor, reverse trigger, micro-detour, accept re-validation)
+      # gates on this. The 30s code default assumed a foreground app pinging
+      # every 15s — a driver whose screen is off went unmatchable almost
+      # immediately. 120s tolerates normal Android scheduling jitter.
+      - MATCH_LOC_FRESH_S=${MATCH_LOC_FRESH_S:-120}
+      - RESEND_API_KEY=${RESEND_API_KEY:-}
+      - EMAIL_FROM=${EMAIL_FROM:-}
+      - AI_RANKER_ENABLED=${AI_RANKER_ENABLED:-false}
+      - AI_PROVIDER_URL=${AI_PROVIDER_URL:-}
+      - AI_PROVIDER_API_KEY=${AI_PROVIDER_API_KEY:-}
+      - AI_MODEL_NAME=${AI_MODEL_NAME:-}
+    volumes:
+      - ./serviceAccountKey.json:/secrets/serviceAccountKey.json:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DOMAIN=${DOMAIN:?set DOMAIN in .env (e.g. sameway.duckdns.org)}
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:

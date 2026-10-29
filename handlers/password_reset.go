@@ -70,8 +70,13 @@ func ForgotPassword(c *gin.Context) {
 		return
 	}
 
-	// If we already sent a code recently, return 429 — don't let an attacker
-	// hammer a real address with emails.
+	// Resend cooldown: don't let an attacker hammer a real address with emails.
+	//
+	// This returns 200, NOT 429. Returning 429 here made the endpoint an
+	// account-existence oracle that defeated the whole point of the uniform
+	// response above: POST twice, and 200/200 meant "no account" while
+	// 200/429 meant "account exists". We enforce the cooldown by skipping the
+	// send and returning the same success shape.
 	var existingCode string
 	var existingCreatedAt time.Time
 	err := db.DB.QueryRow(ctx,
@@ -83,8 +88,7 @@ func ForgotPassword(c *gin.Context) {
 	}
 	now := time.Now()
 	if err == nil && now.Sub(existingCreatedAt) < resetResendCooldown {
-		c.JSON(http.StatusTooManyRequests,
-			gin.H{"error": "please wait a minute before requesting another code"})
+		c.JSON(http.StatusOK, gin.H{"ok": true})
 		return
 	}
 
@@ -100,7 +104,12 @@ func ForgotPassword(c *gin.Context) {
 		ON CONFLICT (email) DO UPDATE
 			SET code = EXCLUDED.code,
 			    expires_at = EXCLUDED.expires_at,
-			    created_at = NOW()
+			    created_at = NOW(),
+			    -- MUST reset: without it, five wrong guesses permanently
+			    -- bricked password reset for that address. Every subsequent
+			    -- code -- including ones the real user requested -- hit the
+			    -- attempts cap and returned "request a new code", forever.
+			    attempts = 0
 	`, emailAddr, code, expires)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
@@ -183,9 +192,13 @@ func ResetPassword(c *gin.Context) {
 	}
 	defer tx.Rollback(ctx)
 
+	// Reset is the account-RECOVERY path, so revoking outstanding sessions
+	// matters most here: whoever the user is locking out still holds a valid
+	// token until token_version moves.
 	var userID, role, name string
 	if err := tx.QueryRow(ctx,
-		`UPDATE users SET password = $1 WHERE email = $2 RETURNING id, role, name`,
+		`UPDATE users SET password = $1, token_version = token_version + 1
+		 WHERE email = $2 RETURNING id, role, name`,
 		string(hash), emailAddr,
 	).Scan(&userID, &role, &name); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
@@ -213,5 +226,8 @@ func ResetPassword(c *gin.Context) {
 		"role":    role,
 		"name":    name,
 		"email":   emailAddr,
+		// Password reset logs the user in, so it reports consent state the
+		// same way /auth/login does.
+		"needs_consent": needsConsent(ctx, userID),
 	})
 }

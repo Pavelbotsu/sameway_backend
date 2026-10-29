@@ -48,6 +48,7 @@ func register(t *testing.T, r *gin.Engine, role, email string) (id, token string
 	w := testutil.PostJSON(t, r, "/auth/register", "", map[string]any{
 		"name": email, "email": email,
 		"password": "test-pass-1", "role": role,
+		"accept_terms": true, "age_confirmed": true,
 	})
 	require.Equal(t, http.StatusCreated, w.Code, "register: %s", w.Body.String())
 	var body map[string]any
@@ -111,9 +112,9 @@ func TestDriverInitiatedFlow(t *testing.T) {
 	assert.Equal(t, "pending", status, "passenger accept only requests; driver must confirm")
 	assert.Equal(t, 0, seatsTaken, "no seat reserved until the driver confirms")
 
-	// Driver receives the passenger_request and confirms.
-	evtType, _ = testutil.ReadEvent(t, driverConn, 3*time.Second)
-	require.Equal(t, "passenger_request", evtType)
+	// Driver receives the passenger_request (skipping informational frames
+	// like corridor_stats) and confirms.
+	testutil.ReadEventOfType(t, driverConn, 3*time.Second, "passenger_request")
 	w = testutil.PostJSON(t, r, "/driver/respond", driverTok, map[string]any{
 		"request_id": reqID, "status": "accepted",
 	})
@@ -175,9 +176,8 @@ func TestPassengerInitiatedFlow(t *testing.T) {
 	})
 	require.Equal(t, http.StatusOK, w.Code)
 
-	// Driver receives passenger_request.
-	evtType, payload := testutil.ReadEvent(t, driverConn, 3*time.Second)
-	require.Equal(t, "passenger_request", evtType)
+	// Driver receives passenger_request (corridor_stats may interleave).
+	payload := testutil.ReadEventOfType(t, driverConn, 3*time.Second, "passenger_request")
 	reqID := payload["request_id"].(string)
 
 	// Driver accepts.
@@ -322,8 +322,7 @@ func TestPickupHandshakeAndDropoff(t *testing.T) {
 		"request_id": reqID, "status": "accepted",
 	})
 	require.Equal(t, http.StatusOK, w.Code)
-	evtType, _ = testutil.ReadEvent(t, driverConn, 3*time.Second)
-	require.Equal(t, "passenger_request", evtType)
+	testutil.ReadEventOfType(t, driverConn, 3*time.Second, "passenger_request")
 
 	// Driver confirms → seat reserved + pickup code generated on the row.
 	w = testutil.PostJSON(t, r, "/driver/respond", driverTok, map[string]any{
@@ -348,8 +347,7 @@ func TestPickupHandshakeAndDropoff(t *testing.T) {
 		"request_id": reqID, "code": code,
 	})
 	require.Equal(t, http.StatusOK, w.Code)
-	evtType, _ = testutil.ReadEvent(t, driverConn, 2*time.Second)
-	assert.Equal(t, "pickup_confirmed", evtType)
+	testutil.ReadEventOfType(t, driverConn, 2*time.Second, "pickup_confirmed")
 
 	var status string
 	require.NoError(t, pool.QueryRow(t.Context(),

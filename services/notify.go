@@ -117,7 +117,9 @@ func NotifyDriverPassengerRequested(fcmToken, passengerID string) {
 // NotifyChatMessage delivers a backgrounded-app push for a new chat message
 // so the recipient sees "<sender>: <preview>" outside the foreground WS path.
 // The body is truncated to 140 chars to fit a single Android/iOS line.
-func NotifyChatMessage(fcmToken, senderID, senderName, rideRequestID, content string) {
+// conversationID keys the persistent pair thread; rideRequestID is non-empty
+// only for messages sent through the old ride-scoped compat shim.
+func NotifyChatMessage(fcmToken, senderID, senderName, conversationID, rideRequestID, content string) {
 	if fcmClient == nil || fcmToken == "" {
 		return
 	}
@@ -140,6 +142,7 @@ func NotifyChatMessage(fcmToken, senderID, senderName, rideRequestID, content st
 		Data: map[string]string{
 			"type":            "chat_message",
 			"sender_id":       senderID,
+			"conversation_id": conversationID,
 			"ride_request_id": rideRequestID,
 		},
 	}
