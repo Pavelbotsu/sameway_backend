@@ -3,6 +3,7 @@ package handlers
 import (
 	"log"
 	"runtime/debug"
+	"strings"
 )
 
 // validLatLng bounds-checks a WGS84 coordinate pair before it reaches
@@ -10,6 +11,15 @@ import (
 // then range-check here.
 func validLatLng(lat, lng float64) bool {
 	return lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180
+}
+
+// firstName returns the first word of a display name. Before a ride is
+// accepted other users see only this (see services.PrivacyGridDeg).
+func firstName(name string) string {
+	if f := strings.Fields(name); len(f) > 0 {
+		return f[0]
+	}
+	return name
 }
 
 // truncateRunes caps s at n CHARACTERS, never splitting a multi-byte one.

@@ -47,10 +47,7 @@
 
 <h2>4. Who sees your data</h2>
 <ul>
-<!-- Describes CURRENT behaviour. Audit finding P0-2 (rounding driver
-     start/end points, plate only after accept) changes this — update the
-     sentence below when that ships. -->
-<li><b>Other users:</b> while a driver has an active route, signed-in passengers nearby can see the driver's name, rating, car make/model/colour, the route and its start and end points. Passengers offered a ride by a driver also see that car's plate and the driver's destination. After a ride is accepted, both sides see each other's name, photo, rating and live location.</li>
+<li><b>Other users:</b> while a driver has an active route, signed-in passengers near them can see the driver's first name, photo, rating, car make/model/colour and an approximate route — its start and end are rounded to roughly 500 m and the route is shortened at both ends, so it does not show exact addresses. After a ride is accepted, both sides see each other's full name, photo, rating and live location, and the passenger sees the car's plate.</li>
 <li><b>Service providers (processors):</b> Google Firebase (push notifications, crash reporting, analytics with your consent, photo storage), [HOSTING PROVIDER] (servers in [COUNTRY]), [ROUTING PROVIDER] (route calculation — receives start/end coordinates), [EMAIL PROVIDER] (sign-in codes), [MAP TILE / GEOCODING PROVIDERS] (receive the map area you view and the addresses you search). [OPTIONAL: AI ranking provider — receives only anonymous numbers such as walking distance, never names or locations.]</li>
 <li>Transfers outside the EEA: [DESCRIBE, e.g. Google LLC under the EU–US Data Privacy Framework / standard contractual clauses].</li>
 <li>Authorities, where the law requires it.</li>

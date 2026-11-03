@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/Pavelbotsu/sameway_backend/config"
 	"github.com/Pavelbotsu/sameway_backend/db"
@@ -723,13 +724,32 @@ func DeleteActiveDriver(driverID string) error {
 	return err
 }
 
+// Pre-match privacy. Anyone signed in can see looking drivers, and a driver's
+// route usually starts at home and ends at work. So before a ride is accepted:
+//   - start/end points are snapped to a PrivacyGridDeg grid (~550 m N–S,
+//     ~360 m E–W at Kraków's latitude), enough to judge "same way";
+//   - the drawn route loses PrivacyTrimM at each end, so its endpoints don't
+//     reveal the exact addresses either;
+//   - only the first name is shown and the plate is withheld until accept.
+const (
+	PrivacyGridDeg = 0.005
+	PrivacyTrimM   = 300.0
+)
+
+// SnapToPrivacyGrid rounds a coordinate to the PrivacyGridDeg grid, matching
+// what ST_SnapToGrid does for the nearby-drivers query.
+func SnapToPrivacyGrid(v float64) float64 {
+	return math.Round(v/PrivacyGridDeg) * PrivacyGridDeg
+}
+
 type NearbyDriver struct {
-	DriverID   string  `json:"driver_id"`
-	DriverName string  `json:"driver_name"`
-	OriginLat  float64 `json:"origin_lat"`
-	OriginLng  float64 `json:"origin_lng"`
-	DestLat    float64 `json:"dest_lat"`
-	DestLng    float64 `json:"dest_lng"`
+	DriverID   string `json:"driver_id"`
+	DriverName string `json:"driver_name"` // first name only (pre-match)
+	// Origin/destination snapped to PrivacyGridDeg — never exact.
+	OriginLat float64 `json:"origin_lat"`
+	OriginLng float64 `json:"origin_lng"`
+	DestLat   float64 `json:"dest_lat"`
+	DestLng   float64 `json:"dest_lng"`
 	CorridorKm float64 `json:"corridor_km"`
 	Seats      int     `json:"seats"`
 	CarMake    string  `json:"car_make"`
@@ -745,9 +765,9 @@ type NearbyDriver struct {
 	// already delivers it on that ride's WS payload. Make/model/colour stay,
 	// which is what the browse UI shows.
 
-	// RouteWKT is SIMPLIFIED (see the query): enough to draw "is this driver
-	// going my way?" on the map, without publishing a metre-accurate track of
-	// where someone drives.
+	// RouteWKT is TRIMMED by PrivacyTrimM at both ends and SIMPLIFIED (see the
+	// query): enough to draw "is this driver going my way?" on the map,
+	// without publishing a metre-accurate track or the exact endpoints.
 	RouteWKT string `json:"route_wkt"`
 	// LikelyMatch tells the passenger which listed drivers the corridor-push
 	// algorithm would consider same-way (forward projection + walk cap +
@@ -778,15 +798,22 @@ type NearbyDriver struct {
 func GetNearbyDrivers(lat, lng, radiusKm, destLat, destLng, destRadiusKm float64, callerID string) ([]NearbyDriver, error) {
 	rows, err := db.DB.Query(context.Background(), `
 		SELECT ad.driver_id,
-		       u.name,
-		       ST_Y(ad.origin::geometry), ST_X(ad.origin::geometry),
-		       ST_Y(ad.destination::geometry), ST_X(ad.destination::geometry),
+		       split_part(u.name, ' ', 1),
+		       ST_Y(ST_SnapToGrid(ad.origin::geometry, $13::float8)),
+		       ST_X(ST_SnapToGrid(ad.origin::geometry, $13::float8)),
+		       ST_Y(ST_SnapToGrid(ad.destination::geometry, $13::float8)),
+		       ST_X(ST_SnapToGrid(ad.destination::geometry, $13::float8)),
 		       ad.corridor_km, ad.seats,
 		       COALESCE(u.car_make,''), COALESCE(u.car_model,''),
 		       COALESCE(u.car_color,''),
-		       -- ~50 m tolerance in degree space: keeps the shape for the map
-		       -- overlay, drops the exact vertex-by-vertex track.
-		       COALESCE(ST_AsText(ST_SimplifyPreserveTopology(ad.route::geometry, 0.0005)), ''),
+		       -- Trim $14 metres off each end (capped so short routes keep
+		       -- their middle 10%), then ~50 m simplification: keeps the shape
+		       -- for the map overlay, drops the track and the endpoints.
+		       COALESCE(ST_AsText(ST_SimplifyPreserveTopology(
+		           ST_LineSubstring(ad.route::geometry,
+		               LEAST($14::float8 / NULLIF(ST_Length(ad.route), 0), 0.45),
+		               GREATEST(1 - $14::float8 / NULLIF(ST_Length(ad.route), 0), 0.55)),
+		           0.0005)), ''),
 		       COALESCE(lm.likely, false),
 		       COALESCE(lm.walk_m, -1),
 		       COALESCE(lm.carry_m, 0),
@@ -866,6 +893,8 @@ func GetNearbyDrivers(lat, lng, radiusKm, destLat, destLng, destRadiusKm float64
 		config.C.MatchMinCarryCityM, // $10
 		config.C.MatchCarryK,        // $11
 		config.C.MatchLocFreshS,     // $12
+		PrivacyGridDeg,              // $13
+		PrivacyTrimM,                // $14
 	)
 	if err != nil {
 		return nil, err

@@ -225,21 +225,25 @@ func notifyCorridorMatches(
 	preferAI bool,
 ) int {
 	var (
-		driverName, carMake, carModel, carColor, carPlate, photoURL string
-		driverAvgRating                                             float64
-		driverRatingCount                                           int
+		driverName, carMake, carModel, carColor, photoURL string
+		driverAvgRating                                   float64
+		driverRatingCount                                 int
 	)
+	// Offers go to up to MaxCorridorNotifications passengers before anyone has
+	// accepted, so they carry the same reduced identity as nearby-drivers:
+	// first name, no plate (driverRespondAccept sends the full details to the
+	// one passenger who gets the ride).
 	if err := db.DB.QueryRow(context.Background(), `
-		SELECT u.name,
+		SELECT split_part(u.name, ' ', 1),
 		       COALESCE(u.car_make,''), COALESCE(u.car_model,''),
-		       COALESCE(u.car_color,''), COALESCE(u.car_plate,''),
+		       COALESCE(u.car_color,''),
 		       COALESCE(u.photo_url,''),
 		       COALESCE(AVG(r.stars), 0), COUNT(r.id)
 		FROM users u
 		LEFT JOIN ratings r ON r.rated_id = u.id
 		WHERE u.id = $1
-		GROUP BY u.id, u.name, u.car_make, u.car_model, u.car_color, u.car_plate, u.photo_url
-	`, driverID).Scan(&driverName, &carMake, &carModel, &carColor, &carPlate, &photoURL, &driverAvgRating, &driverRatingCount); err != nil {
+		GROUP BY u.id, u.name, u.car_make, u.car_model, u.car_color, u.photo_url
+	`, driverID).Scan(&driverName, &carMake, &carModel, &carColor, &photoURL, &driverAvgRating, &driverRatingCount); err != nil {
 		log.Printf("notifyCorridorMatches: driver profile %s: %v", driverID, err)
 	}
 
@@ -274,9 +278,10 @@ func notifyCorridorMatches(
 			"car_make":                    carMake,
 			"car_model":                   carModel,
 			"car_color":                   carColor,
-			"car_plate":                   carPlate,
-			"destination_lat":             destLat,
-			"destination_lng":             destLng,
+			// Coarse: the passenger only needs "is the driver heading my
+			// way", not the address the driver is going to.
+			"destination_lat":             services.SnapToPrivacyGrid(destLat),
+			"destination_lng":             services.SnapToPrivacyGrid(destLng),
 			"corridor_km":                 corridorKm,
 			"seats":                       seats,
 			"pickup_lat":                  m.PickupLat,
@@ -939,7 +944,9 @@ func driverRespondDecline(c *gin.Context, driverID, requestID string) {
 		return
 	}
 
-	name, avg, count, carMake, carModel, carColor, carPlate, photoURL := loadDriverProfile(driverID)
+	// No plate: it identifies the driver's car and only the passenger of an
+	// ACCEPTED ride needs it (driverRespondAccept sends it).
+	name, avg, count, carMake, carModel, carColor, _, photoURL := loadDriverProfile(driverID)
 	Hub.SendToUser(passengerID, "driver_response", gin.H{
 		"request_id":          requestID,
 		"driver_id":           driverID,
@@ -950,7 +957,6 @@ func driverRespondDecline(c *gin.Context, driverID, requestID string) {
 		"car_make":            carMake,
 		"car_model":           carModel,
 		"car_color":           carColor,
-		"car_plate":           carPlate,
 		"status":              "declined",
 	})
 	go safeGo("match-event", func() { logMatchEvent(requestID, "driver_declined", nil) })()

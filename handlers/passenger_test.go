@@ -38,6 +38,7 @@ func TestNearbyDrivers_ExcludesSelf(t *testing.T) {
 	pool, r := setupHandlers(t)
 	// User who is both a driver (active row) AND querying as a passenger.
 	id, tok := testutil.CreateUser(t, pool, "passenger", "self")
+	testutil.CreateActivePassenger(t, pool, id, testutil.LatLng{Lat: 50, Lng: 20}, nil)
 	testutil.CreateActiveDriver(t, pool, id,
 		testutil.LatLng{Lat: 50, Lng: 20},
 		testutil.LatLng{Lat: 50, Lng: 20.1},

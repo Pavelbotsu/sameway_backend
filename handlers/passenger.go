@@ -17,6 +17,11 @@ import (
 // asks for 10; anything much beyond that is a scrape, not a map view.
 const maxNearbyRadiusKm = 15
 
+// maxNearbyQueryOffsetM: how far the nearby-drivers query point may be from
+// the caller's last reported location before it is snapped back to it. Covers
+// GPS jitter and a fix taken between two location pings.
+const maxNearbyQueryOffsetM = 2000.0
+
 func PassengerUpdateLocation(c *gin.Context) {
 	// Pointer coords: `required` on plain floats rejects legal zero values
 	// (equator / Greenwich meridian).
@@ -288,7 +293,13 @@ func GetMyRequests(c *gin.Context) {
 			"car_make":            carMake,
 			"car_model":           carModel,
 			"car_color":           carColor,
-			"car_plate":           carPlate,
+		}
+		// Plate and full name only once the driver has accepted — the same
+		// rule as the WS payloads (nearby / offer / decline carry neither).
+		if status == "accepted" || status == "in_progress" {
+			entry["car_plate"] = carPlate
+		} else {
+			entry["driver_name"] = firstName(name)
 		}
 		if pickedUpAt != nil {
 			entry["picked_up_at"] = pickedUpAt.Format(time.RFC3339)
@@ -329,7 +340,30 @@ func NearbyDrivers(c *gin.Context) {
 		req.DestRadiusKm = maxNearbyRadiusKm
 	}
 	callerID := c.GetString("user_id")
-	drivers, err := services.GetNearbyDrivers(*req.Lat, *req.Lng, req.RadiusKm, req.DestLat, req.DestLng, req.DestRadiusKm, callerID)
+	// Search around where the caller actually is, not wherever they claim.
+	// Without this one account could sweep the whole city's drivers by
+	// POSTing arbitrary coordinates. The app always sends its own position
+	// (and PUTs it to /passenger/location first), so a request far from the
+	// stored point is snapped back to it; no stored point → no search.
+	var curLat, curLng float64
+	if err := db.DB.QueryRow(c.Request.Context(), `
+		SELECT ST_Y(location::geometry), ST_X(location::geometry)
+		FROM active_passengers WHERE passenger_id = $1`, callerID,
+	).Scan(&curLat, &curLng); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			c.JSON(http.StatusConflict, gin.H{
+				"error": "update your location first", "code": "location_required",
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	lat, lng := *req.Lat, *req.Lng
+	if services.HaversineM(lat, lng, curLat, curLng) > maxNearbyQueryOffsetM {
+		lat, lng = curLat, curLng
+	}
+	drivers, err := services.GetNearbyDrivers(lat, lng, req.RadiusKm, req.DestLat, req.DestLng, req.DestRadiusKm, callerID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
