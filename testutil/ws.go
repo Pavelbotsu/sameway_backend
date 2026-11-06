@@ -21,13 +21,16 @@ func ServeWS(t testing.TB, r *gin.Engine) string {
 	return "ws" + strings.TrimPrefix(srv.URL, "http")
 }
 
-// DialWS opens a WebSocket connection to /ws with a token query param.
+// DialWS opens a WebSocket connection to /ws with a token query param and
+// consumes the server's `hello` greeting, so tests see only real events.
 // Returns the connection — caller is responsible for Close.
 func DialWS(t testing.TB, wsBase, token string) *websocket.Conn {
 	t.Helper()
 	conn, _, err := websocket.DefaultDialer.Dial(wsBase+"/ws?token="+token, nil)
 	require.NoError(t, err, "dial ws")
 	t.Cleanup(func() { _ = conn.Close() })
+	evtType, _ := ReadEvent(t, conn, 2*time.Second)
+	require.Equal(t, "hello", evtType, "server must greet every new connection")
 	return conn
 }
 

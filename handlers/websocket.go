@@ -195,6 +195,14 @@ func HandleWS(c *gin.Context) {
 	}
 
 	client := &wsClient{conn: conn, send: make(chan []byte, 64)}
+	// Greeting frame, queued before the client is reachable by anyone else so
+	// it is always first. WS pings are control frames that most client
+	// libraries never surface, so without a data frame the app could not tell
+	// a working-but-quiet socket from one that never upgraded — and it counted
+	// every ordinary drop as an auth failure and logged the user out.
+	if hello, err := json.Marshal(models.WSMessage{Type: "hello", Payload: gin.H{}}); err == nil {
+		client.send <- hello
+	}
 	Hub.register(userID, client)
 	defer func() {
 		Hub.unregister(userID, client)
