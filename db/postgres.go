@@ -309,10 +309,6 @@ const alterSQL = `
 		-- call. Plain geometry (not geography) because measures need geometry.
 		ALTER TABLE active_drivers ADD COLUMN IF NOT EXISTS route_m geometry(LineStringM,4326);
 
-		-- Phase 2: per-vertex OSM road class (from OSRM steps) for
-		-- stoppability + city/fast carry split.
-		-- ALTER TABLE active_drivers ADD COLUMN IF NOT EXISTS route_classes TEXT[];
-
 		-- Opt-in longer walk: default matching uses a short walk cap; a
 		-- passenger willing to walk further for a same-direction ride sets this.
 		ALTER TABLE active_passengers ADD COLUMN IF NOT EXISTS allow_long_walk BOOLEAN NOT NULL DEFAULT FALSE;

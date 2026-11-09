@@ -949,23 +949,3 @@ func GetNearbyDrivers(lat, lng, radiusKm, destLat, destLng, destRadiusKm float64
 	}
 	return drivers, rows.Err()
 }
-
-func GetActiveDriver(driverID string) (*models.ActiveDriver, error) {
-	var d models.ActiveDriver
-	err := db.DB.QueryRow(context.Background(), `
-		SELECT id, driver_id,
-		       ST_Y(origin::geometry), ST_X(origin::geometry),
-		       ST_Y(destination::geometry), ST_X(destination::geometry),
-		       corridor_km, seats, status, created_at
-		FROM active_drivers WHERE driver_id = $1
-	`, driverID).Scan(
-		&d.ID, &d.DriverID,
-		&d.OriginLat, &d.OriginLng,
-		&d.DestLat, &d.DestLng,
-		&d.CorridorKm, &d.Seats, &d.Status, &d.CreatedAt,
-	)
-	if err != nil {
-		return nil, err
-	}
-	return &d, nil
-}

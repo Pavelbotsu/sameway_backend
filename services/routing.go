@@ -18,23 +18,11 @@ type RouteResult struct {
 	// Coords: Durations[i] is the time from Coords[i] to Coords[i+1], so
 	// len(Durations) == len(Coords)-1. Empty when the OSRM deployment doesn't
 	// return duration annotations. Used to build the measured route line for
-	// ETA-to-pickup interpolation (see CumulativeDurations / matching).
+	// ETA-to-pickup interpolation.
 	Durations []float64
 	// DurationS is the total route travel time in seconds (sum of Durations,
 	// or OSRM's route-level duration when annotations are absent).
 	DurationS float64
-}
-
-// CumulativeDurations turns per-segment seconds into cumulative seconds per
-// vertex: returns a slice of len(segments)+1 where out[0]=0 and out[i] is the
-// total time from the start to vertex i. Used to build the LINESTRING M whose
-// M dimension carries travel time.
-func CumulativeDurations(segments []float64) []float64 {
-	out := make([]float64, len(segments)+1)
-	for i, s := range segments {
-		out[i+1] = out[i] + s
-	}
-	return out
 }
 
 // RoutingClient abstracts road-route lookups so tests can swap a mock without
