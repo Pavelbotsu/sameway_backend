@@ -223,10 +223,21 @@ const alterSQL = `
 		-- extra ACCESS EXCLUSIVE locks and two full table revalidations on
 		-- every single boot, for a constraint that never survived the script.
 
-		DROP INDEX IF EXISTS uniq_active_ride_request;
-		CREATE UNIQUE INDEX IF NOT EXISTS uniq_active_ride_request
-			ON ride_requests (driver_id, passenger_id)
-			WHERE status IN ('offered','pending','accepted','in_progress');
+		-- Rebuilt only when missing or outdated (the 'offered' status is the
+		-- newest part of its predicate). It used to be dropped and rebuilt on
+		-- every boot: a full index build under lock on each deploy.
+		DO $$
+		BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_indexes
+				WHERE indexname = 'uniq_active_ride_request' AND indexdef LIKE '%offered%'
+			) THEN
+				DROP INDEX IF EXISTS uniq_active_ride_request;
+				CREATE UNIQUE INDEX uniq_active_ride_request
+					ON ride_requests (driver_id, passenger_id)
+					WHERE status IN ('offered','pending','accepted','in_progress');
+			END IF;
+		END $$;
 
 		-- Bug reports: in-app feedback channel. Read with psql; future
 		-- versions may forward to email/Slack.
@@ -318,9 +329,21 @@ const alterSQL = `
 		-- pick), but never two active rows with the same driver. Committed
 		-- engagements (pending/accepted/in_progress) remove the passenger from
 		-- corridor candidacy via the NOT EXISTS in FindPassengersInCorridor.
-		ALTER TABLE ride_requests DROP CONSTRAINT IF EXISTS ride_requests_status_check;
-		ALTER TABLE ride_requests ADD CONSTRAINT ride_requests_status_check
-			CHECK (status IN ('offered','pending','accepted','in_progress','done','declined','cancelled','expired_passed'));
+		-- Replaced only when the stored check lacks the newest status — not on
+		-- every boot (each re-add took an ACCESS EXCLUSIVE lock and revalidated
+		-- the whole table).
+		DO $$
+		BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conname = 'ride_requests_status_check'
+				  AND pg_get_constraintdef(oid) LIKE '%expired_passed%'
+			) THEN
+				ALTER TABLE ride_requests DROP CONSTRAINT IF EXISTS ride_requests_status_check;
+				ALTER TABLE ride_requests ADD CONSTRAINT ride_requests_status_check
+					CHECK (status IN ('offered','pending','accepted','in_progress','done','declined','cancelled','expired_passed'));
+			END IF;
+		END $$;
 
 		-- ── Release hardening ─────────────────────────────────────────────────
 		-- Brute-force cap on reset / verification codes: the row dies after
@@ -504,8 +527,7 @@ const alterSQL = `
 		END;
 		$$ LANGUAGE plpgsql;
 
-		DROP TRIGGER IF EXISTS trg_ride_requests_status_changed ON ride_requests;
-		CREATE TRIGGER trg_ride_requests_status_changed
+		CREATE OR REPLACE TRIGGER trg_ride_requests_status_changed
 			BEFORE UPDATE ON ride_requests
 			FOR EACH ROW EXECUTE FUNCTION ride_requests_stamp_status_change();
 
