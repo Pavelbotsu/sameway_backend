@@ -269,15 +269,15 @@ func notifyCorridorMatches(
 			continue
 		}
 		payload := gin.H{
-			"request_id":                  requestID,
-			"driver_id":                   driverID,
-			"driver_name":                 driverName,
-			"driver_photo_url":            photoURL,
-			"driver_avg_rating":           driverAvgRating,
-			"driver_rating_count":         driverRatingCount,
-			"car_make":                    carMake,
-			"car_model":                   carModel,
-			"car_color":                   carColor,
+			"request_id":          requestID,
+			"driver_id":           driverID,
+			"driver_name":         driverName,
+			"driver_photo_url":    photoURL,
+			"driver_avg_rating":   driverAvgRating,
+			"driver_rating_count": driverRatingCount,
+			"car_make":            carMake,
+			"car_model":           carModel,
+			"car_color":           carColor,
 			// Coarse: the passenger only needs "is the driver heading my
 			// way", not the address the driver is going to.
 			"destination_lat":             services.SnapToPrivacyGrid(destLat),

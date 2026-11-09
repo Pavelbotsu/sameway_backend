@@ -38,9 +38,10 @@ func Auth() gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "session expired"})
 			return
 		}
-		// A suspended user may still sign out and delete their account
+		// A suspended user may still sign out, export their data and delete
+		// their account
 		// (GDPR erasure doesn't stop at a suspension).
-		if st.Suspended && c.FullPath() != "/auth/delete-account" && c.FullPath() != "/auth/logout" {
+		if st.Suspended && !suspendedAllowed[c.FullPath()] {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 				"error": "this account is suspended", "code": "account_suspended",
 			})
@@ -54,6 +55,14 @@ func Auth() gin.HandlerFunc {
 }
 
 const ctxConsentOK = "consent_ok"
+
+// Routes a suspended account can still use: data-subject rights don't stop
+// at a suspension.
+var suspendedAllowed = map[string]bool{
+	"/auth/delete-account": true,
+	"/auth/logout":         true,
+	"/auth/export":         true,
+}
 
 // AccountStatus is what Auth needs to know about the caller on every request,
 // read in ONE primary-key lookup (it used to be just token_version).
