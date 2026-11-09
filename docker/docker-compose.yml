@@ -17,7 +17,9 @@ services:
       - POSTGRES_PASSWORD=password
       - POSTGRES_DB=rideshare
     ports:
-      - "127.0.0.1:5432:5432"
+      # DB_HOST_PORT overrides the host side when 5432 is taken (e.g. by a
+      # native Postgres install); scripts/dev.sh uses 55432.
+      - "127.0.0.1:${DB_HOST_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
