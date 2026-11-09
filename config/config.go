@@ -18,6 +18,10 @@ type Config struct {
 	DBUser                    string
 	DBPassword                string
 	DBName                    string
+	// DB pool: max connections and per-statement timeout (ms). See
+	// db.ConfigurePool for why both are set explicitly.
+	DBMaxConns           int
+	DBStatementTimeoutMs int
 	JWTSecret                 string
 	JWTTTLHours               int
 	FirebaseCredPath          string
@@ -125,6 +129,8 @@ func Load() {
 		DBUser:                    getEnv("DB_USER", "postgres"),
 		DBPassword:                getEnv("DB_PASSWORD", "password"),
 		DBName:                    getEnv("DB_NAME", "rideshare"),
+		DBMaxConns:                getEnvInt("DB_MAX_CONNS", 20),
+		DBStatementTimeoutMs:      getEnvInt("DB_STATEMENT_TIMEOUT_MS", 5000),
 		JWTSecret:                 getEnv("JWT_SECRET", "change-this"),
 		// 168h (7 days), down from 720h (30 days): a leaked token is only as
 		// dangerous as it is long-lived. Deliberate logout is handled by the

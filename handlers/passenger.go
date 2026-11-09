@@ -48,7 +48,7 @@ func PassengerUpdateLocation(c *gin.Context) {
 	// reach parked drivers whose own location updates may never come.
 	// Throttled per passenger; runs detached so the ping stays fast.
 	if shouldRerunPassengerMatch(passengerID, lat, lng) {
-		go safeGo("reverseMatchForPassenger", func() { reverseMatchForPassenger(passengerID) })()
+		goMatch("reverseMatchForPassenger", func() { reverseMatchForPassenger(passengerID) })
 	}
 
 	// Live location: relay to the counterparty driver(s) of any active ride
@@ -616,7 +616,7 @@ func PassengerSearch(c *gin.Context) {
 	// A destination (un)set changes matching inputs without the passenger
 	// moving, so gate on the time floor only (not the movement floor).
 	if shouldRerunPassengerMatchTimeOnly(passengerID, originLat, originLng) {
-		go safeGo("reverseMatchForPassenger", func() { reverseMatchForPassenger(passengerID) })()
+		goMatch("reverseMatchForPassenger", func() { reverseMatchForPassenger(passengerID) })
 	}
 
 	routeWkt := ""

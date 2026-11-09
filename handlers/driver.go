@@ -199,7 +199,7 @@ func SetRoute(c *gin.Context) {
 	emitCorridorStats(driverID, len(matches), notified)
 	// Micro-detour fallback (§2): opt-in, near-miss-only, async — an OSRM
 	// round-trip must not sit on the route-set response.
-	go safeGo("micro-detour-pass", func() { runMicroDetourPass(driverID) })()
+	goMatch("micro-detour-pass", func() { runMicroDetourPass(driverID) })
 
 	c.JSON(http.StatusOK, gin.H{
 		"route_wkt":      route.WKT,
@@ -477,7 +477,7 @@ func UpdateLocation(c *gin.Context) {
 	// skipped automatically. Throttled by distance moved (MatchRerunMovedM)
 	// with a small time floor — see shouldRerunCorridor.
 	if shouldRerunCorridor(driverID, lat, lng) {
-		go safeGo("rerunCorridorMatch", func() { rerunCorridorMatch(driverID) })()
+		goMatch("rerunCorridorMatch", func() { rerunCorridorMatch(driverID) })
 	}
 
 	// Live location: relay to the counterparty passenger(s) of any active ride
@@ -616,7 +616,7 @@ func startRelayLeg2IfNeeded(requestID, passengerID, matchKind string) {
 		"request_id": requestID,
 	})
 	logMatchEventKnownKind(requestID, matchKind, "leg2_search_started", nil)
-	go safeGo("relay-leg2-match", func() { reverseMatchForPassenger(passengerID) })()
+	goMatch("relay-leg2-match", func() { reverseMatchForPassenger(passengerID) })
 }
 
 // DropoffPassenger ends a single passenger's ride without ending the driver's

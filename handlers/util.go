@@ -4,6 +4,7 @@ import (
 	"log"
 	"runtime/debug"
 	"strings"
+	"time"
 )
 
 // validLatLng bounds-checks a WGS84 coordinate pair before it reaches
@@ -52,4 +53,42 @@ func safeGo(name string, fn func()) func() {
 		}()
 		fn()
 	}
+}
+
+// Background matching (corridor reruns, reverse trigger, micro-detour) is
+// fire-and-forget and each run holds DB connections for heavy PostGIS work.
+// Unbounded, a burst of location pings starved the pool and request handlers
+// waited behind it (audit: location PUT p95 5.5 s at 1k passengers). At most
+// bgMatchLimit runs execute at once; a run that can't start within
+// bgMatchWait is dropped — every trigger is periodic, so the next ping
+// retries.
+const (
+	bgMatchLimit = 4
+	bgMatchWait  = 10 * time.Second
+)
+
+var bgMatchSem = make(chan struct{}, bgMatchLimit)
+
+// goMatch runs fn in the background under the matching concurrency limit,
+// with panic recovery.
+func goMatch(name string, fn func()) {
+	go safeGo(name, func() {
+		runLimited(bgMatchSem, bgMatchWait, name, fn)
+	})()
+}
+
+// runLimited runs fn once a slot in sem is free, or gives up after wait.
+// Reports whether fn ran.
+func runLimited(sem chan struct{}, wait time.Duration, name string, fn func()) bool {
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case sem <- struct{}{}:
+	case <-timer.C:
+		log.Printf("background %s skipped: %d matching runs already busy for %s", name, cap(sem), wait)
+		return false
+	}
+	defer func() { <-sem }()
+	fn()
+	return true
 }

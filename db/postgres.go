@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"github.com/Pavelbotsu/sameway_backend/config"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -15,12 +16,38 @@ func Connect() error {
 		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
 		config.C.DBHost, config.C.DBPort, config.C.DBUser, config.C.DBPassword, config.C.DBName,
 	)
-	pool, err := pgxpool.New(context.Background(), dsn)
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return fmt.Errorf("db config: %w", err)
+	}
+	ConfigurePool(cfg, config.C.DBMaxConns, config.C.DBStatementTimeoutMs)
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	if err != nil {
 		return fmt.Errorf("db connect: %w", err)
 	}
 	DB = pool
 	return Migrate()
+}
+
+// ConfigurePool applies the production pool settings.
+//
+//   - MaxConns: pgx defaults to max(4, NumCPU) — 4 on a small VPS. The audit
+//     bench saw 52–76 % of acquires wait even at 12, and fire-and-forget
+//     matching goroutines starving request handlers (location PUT p95 5.5 s).
+//   - statement_timeout: one pathological query must not hold a connection
+//     (and the user's request) for minutes.
+//   - plan_cache_mode=force_custom_plan: pgx caches prepared statements, and
+//     after 5 runs Postgres may switch to a generic plan. For queries with an
+//     optional parameter ($15 IS NULL OR id = $15) the generic plan can't
+//     prune — measured 0.5 ms vs ~235 ms per call.
+func ConfigurePool(cfg *pgxpool.Config, maxConns, statementTimeoutMs int) {
+	if maxConns > 0 {
+		cfg.MaxConns = int32(maxConns)
+	}
+	if statementTimeoutMs > 0 {
+		cfg.ConnConfig.RuntimeParams["statement_timeout"] = strconv.Itoa(statementTimeoutMs)
+	}
+	cfg.ConnConfig.RuntimeParams["plan_cache_mode"] = "force_custom_plan"
 }
 
 // Migrate runs the schema migration against the global pool. Existing
@@ -31,12 +58,26 @@ func Migrate() error {
 
 // MigratePool runs the same schema migration against an arbitrary pool. Used
 // by tests to set up a fresh container-backed database.
+//
+// One transaction with the statement timeout lifted: boot DDL (index builds,
+// backfills) may legitimately take longer than the request timeout, and a
+// half-applied migration must not commit.
 func MigratePool(ctx context.Context, pool *pgxpool.Pool) error {
-	if _, err := pool.Exec(ctx, schemaSQL); err != nil {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
 		return err
 	}
-	_, err := pool.Exec(ctx, alterSQL)
-	return err
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SET LOCAL statement_timeout = 0`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, schemaSQL); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, alterSQL); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 const schemaSQL = `
