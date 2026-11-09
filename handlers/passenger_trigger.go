@@ -97,14 +97,22 @@ func reverseMatchForPassenger(passengerID string) {
 		      WHERE (b.blocker_id = $1 AND b.blocked_id = ad.driver_id)
 		         OR (b.blocker_id = ad.driver_id AND b.blocked_id = $1)
 		  )
-		  -- Constant radius so the GIST index on route is usable (the old
-		  -- GREATEST(corridor_km*1000, …) forced a seq scan: 88 ms → 5 ms at
-		  -- 5k in the audit bench). Same candidates in practice: the corridor
-		  -- query only matches a pickup within the walk cap, ≤ $3.
-		  AND ST_DWithin(ad.route, ap.location, $3::float8)
+		  -- Constant radius: the corridor query only matches a pickup within
+		  -- the walk cap (≤ $3), and a constant lets the GIST index on route
+		  -- prefilter by bounding box (the same index condition ST_DWithin
+		  -- on geography generates). The old GREATEST(corridor_km*1000, …)
+		  -- radius forced a seq scan.
+		  AND ad.route && _ST_Expand(ap.location, $3::float8)
+		  -- Exact check and ordering on the stored Web Mercator route:
+		  -- planar distance divided by the local scale factor 1/cos(lat) is
+		  -- metres to well under 1 % over 2 km, and is far cheaper than
+		  -- spheroid distance on long routes. Audit bench at 5k: 332 ms
+		  -- (spheroid filter + order) → 30 ms, same drivers, same order.
+		  AND ST_DWithin(ad.route_3857, ST_Transform(ap.location::geometry, 3857),
+		                 $3::float8 / cos(radians(ST_Y(ap.location::geometry))))
 		-- Nearest first, so the cap keeps the most relevant drivers instead
 		-- of an arbitrary subset.
-		ORDER BY ST_Distance(ad.route, ap.location)
+		ORDER BY ST_Distance(ad.route_3857, ST_Transform(ap.location::geometry, 3857))
 		LIMIT $4
 	`, passengerID, config.C.MatchLocFreshS, config.C.MatchWalkLongM,
 		config.C.MatchPaxTriggerMaxDrivers)
