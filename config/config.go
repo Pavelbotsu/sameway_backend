@@ -11,17 +11,17 @@ import (
 type Config struct {
 	// AppEnv is "dev" or "prod". Prod refuses to boot on insecure defaults
 	// (see Validate).
-	AppEnv                    string
-	Port                      string
-	DBHost                    string
-	DBPort                    string
-	DBUser                    string
-	DBPassword                string
-	DBName                    string
+	AppEnv     string
+	Port       string
+	DBHost     string
+	DBPort     string
+	DBUser     string
+	DBPassword string
+	DBName     string
 	// DB pool: max connections and per-statement timeout (ms). See
 	// db.ConfigurePool for why both are set explicitly.
-	DBMaxConns           int
-	DBStatementTimeoutMs int
+	DBMaxConns                int
+	DBStatementTimeoutMs      int
 	JWTSecret                 string
 	JWTTTLHours               int
 	FirebaseCredPath          string
@@ -130,16 +130,16 @@ var C Config
 func Load() {
 	godotenv.Load()
 	C = Config{
-		AppEnv:                    getEnv("APP_ENV", "dev"),
-		Port:                      getEnv("PORT", "8080"),
-		DBHost:                    getEnv("DB_HOST", "localhost"),
-		DBPort:                    getEnv("DB_PORT", "5432"),
-		DBUser:                    getEnv("DB_USER", "postgres"),
-		DBPassword:                getEnv("DB_PASSWORD", "password"),
-		DBName:                    getEnv("DB_NAME", "rideshare"),
-		DBMaxConns:                getEnvInt("DB_MAX_CONNS", 20),
-		DBStatementTimeoutMs:      getEnvInt("DB_STATEMENT_TIMEOUT_MS", 5000),
-		JWTSecret:                 getEnv("JWT_SECRET", "change-this"),
+		AppEnv:               getEnv("APP_ENV", "dev"),
+		Port:                 getEnv("PORT", "8080"),
+		DBHost:               getEnv("DB_HOST", "localhost"),
+		DBPort:               getEnv("DB_PORT", "5432"),
+		DBUser:               getEnv("DB_USER", "postgres"),
+		DBPassword:           getEnv("DB_PASSWORD", "password"),
+		DBName:               getEnv("DB_NAME", "rideshare"),
+		DBMaxConns:           getEnvInt("DB_MAX_CONNS", 20),
+		DBStatementTimeoutMs: getEnvInt("DB_STATEMENT_TIMEOUT_MS", 5000),
+		JWTSecret:            getEnv("JWT_SECRET", "change-this"),
 		// 168h (7 days), down from 720h (30 days): a leaked token is only as
 		// dangerous as it is long-lived. Deliberate logout is handled by the
 		// users.token_version bump, not by expiry.
@@ -159,15 +159,15 @@ func Load() {
 		ResendAPIKey: getEnv("RESEND_API_KEY", ""),
 		EmailFrom:    getEnv("EMAIL_FROM", ""),
 
-		MatchEtaMinS:        getEnvFloat("MATCH_ETA_MIN_S", 90),
-		MatchEtaMaxS:        getEnvFloat("MATCH_ETA_MAX_S", 600),
-		MatchMinAheadM:      getEnvFloat("MATCH_MIN_AHEAD_M", 300),
-		MatchWalkCapM:       getEnvFloat("MATCH_WALK_CAP_M", 600),
-		MatchWalkLongM:      getEnvFloat("MATCH_WALK_LONG_M", 2000),
-		MatchMinCarryCityM:  getEnvFloat("MATCH_MIN_CARRY_CITY_M", 2000),
-		MatchMinCarryFastM:  getEnvFloat("MATCH_MIN_CARRY_FAST_M", 15000),
-		MatchFastRoadKmh:    getEnvFloat("MATCH_FAST_ROAD_KMH", 80),
-		MatchCarryK:         getEnvFloat("MATCH_CARRY_K", 4),
+		MatchEtaMinS:       getEnvFloat("MATCH_ETA_MIN_S", 90),
+		MatchEtaMaxS:       getEnvFloat("MATCH_ETA_MAX_S", 600),
+		MatchMinAheadM:     getEnvFloat("MATCH_MIN_AHEAD_M", 300),
+		MatchWalkCapM:      getEnvFloat("MATCH_WALK_CAP_M", 600),
+		MatchWalkLongM:     getEnvFloat("MATCH_WALK_LONG_M", 2000),
+		MatchMinCarryCityM: getEnvFloat("MATCH_MIN_CARRY_CITY_M", 2000),
+		MatchMinCarryFastM: getEnvFloat("MATCH_MIN_CARRY_FAST_M", 15000),
+		MatchFastRoadKmh:   getEnvFloat("MATCH_FAST_ROAD_KMH", 80),
+		MatchCarryK:        getEnvFloat("MATCH_CARRY_K", 4),
 		// 120s, not 30s. Every match path gates on this, and the client can only
 		// refresh it from a foreground timer — at 30s a driver whose screen
 		// switched off was dropped from matching almost immediately, which reads

@@ -337,22 +337,22 @@ func findPassengersInCorridor(driverID, routeWKT string, corridorKm, destLat, de
 		ORDER BY eta_pickup_s ASC
 		LIMIT $12
 	`,
-		driverID,                     // $1
-		routeWKT,                     // $2  (bounding pre-filter)
-		corridorM,                    // $3  on-route dropoff tolerance
-		config.C.MatchLocFreshS,      // $4
-		config.C.MatchMinAheadM,      // $5
-		config.C.MatchEtaMinS,        // $6
-		config.C.MatchEtaMaxS,        // $7
-		config.C.MatchWalkCapM,       // $8
-		config.C.MatchWalkLongM,      // $9
-		config.C.MatchMinCarryCityM,  // $10
-		config.C.MatchCarryK,         // $11
-		limit,                        // $12
-		config.C.MatchFastRoadKmh,    // $13
-		config.C.MatchMinCarryFastM,  // $14
-		passengerID,                  // $15 (nil → no restriction)
-		config.C.GTFSStopRadiusM,     // $16
+		driverID,                      // $1
+		routeWKT,                      // $2  (bounding pre-filter)
+		corridorM,                     // $3  on-route dropoff tolerance
+		config.C.MatchLocFreshS,       // $4
+		config.C.MatchMinAheadM,       // $5
+		config.C.MatchEtaMinS,         // $6
+		config.C.MatchEtaMaxS,         // $7
+		config.C.MatchWalkCapM,        // $8
+		config.C.MatchWalkLongM,       // $9
+		config.C.MatchMinCarryCityM,   // $10
+		config.C.MatchCarryK,          // $11
+		limit,                         // $12
+		config.C.MatchFastRoadKmh,     // $13
+		config.C.MatchMinCarryFastM,   // $14
+		passengerID,                   // $15 (nil → no restriction)
+		config.C.GTFSStopRadiusM,      // $16
 		config.C.MatchRelayMinDrivers, // $17
 	)
 	if err != nil {
@@ -497,19 +497,19 @@ func FindNearMissCandidates(driverID, routeWKT string, corridorKm float64, limit
 		ORDER BY eta_pickup_s ASC
 		LIMIT $13
 	`,
-		driverID,                     // $1
-		routeWKT,                     // $2
-		corridorM,                    // $3
-		config.C.MatchLocFreshS,      // $4
-		config.C.MatchMinAheadM,      // $5
-		config.C.MatchEtaMinS,        // $6
-		config.C.MatchEtaMaxS,        // $7
-		config.C.MatchWalkCapM,       // $8
-		config.C.MatchWalkLongM,      // $9
+		driverID,                      // $1
+		routeWKT,                      // $2
+		corridorM,                     // $3
+		config.C.MatchLocFreshS,       // $4
+		config.C.MatchMinAheadM,       // $5
+		config.C.MatchEtaMinS,         // $6
+		config.C.MatchEtaMaxS,         // $7
+		config.C.MatchWalkCapM,        // $8
+		config.C.MatchWalkLongM,       // $9
 		config.C.MatchDetourNearMissM, // $10
-		config.C.MatchMinCarryCityM,  // $11
-		config.C.MatchCarryK,         // $12
-		limit,                        // $13
+		config.C.MatchMinCarryCityM,   // $11
+		config.C.MatchCarryK,          // $12
+		limit,                         // $13
 	)
 	if err != nil {
 		return nil, fmt.Errorf("near-miss query: %w", err)
@@ -768,10 +768,10 @@ type NearbyDriver struct {
 	DriverID   string `json:"driver_id"`
 	DriverName string `json:"driver_name"` // first name only (pre-match)
 	// Origin/destination snapped to PrivacyGridDeg — never exact.
-	OriginLat float64 `json:"origin_lat"`
-	OriginLng float64 `json:"origin_lng"`
-	DestLat   float64 `json:"dest_lat"`
-	DestLng   float64 `json:"dest_lng"`
+	OriginLat  float64 `json:"origin_lat"`
+	OriginLng  float64 `json:"origin_lng"`
+	DestLat    float64 `json:"dest_lat"`
+	DestLng    float64 `json:"dest_lng"`
 	CorridorKm float64 `json:"corridor_km"`
 	Seats      int     `json:"seats"`
 	CarMake    string  `json:"car_make"`
