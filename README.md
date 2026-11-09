@@ -345,6 +345,24 @@ Notes:
 - Postgres publishes **no ports**; it is reachable only from the compose
   network.
 
+### Backups
+
+The `backup` service dumps the database once at start-up and then nightly
+(`BACKUP_HOUR_UTC`, default 02:00) into `./backups/` on the host, keeping
+`BACKUP_KEEP_DAYS` (default 14) days of `rideshare-*.dump` files.
+
+- **Copy `./backups` off the server** (rclone/rsync to object storage or
+  another machine). Backups on the same disk die with it.
+- **Restore drill, monthly** — loads a dump into a throwaway container and
+  prints row counts; touches nothing in production:
+  `scripts/restore.sh drill backups/rideshare-YYYYMMDD-HHMMSS.dump`
+- **Real restore** (replaces production data):
+  ```bash
+  docker compose -f docker-compose.prod.yml stop app
+  RESTORE_CONFIRM=yes scripts/restore.sh restore backups/<file>.dump
+  docker compose -f docker-compose.prod.yml start app
+  ```
+
 ---
 
 ## Build status
