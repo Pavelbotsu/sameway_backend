@@ -67,7 +67,8 @@ func TestRegister_RecordsConsent(t *testing.T) {
 // they accept via /auth/consent.
 func TestLogin_LegacyAccountNeedsConsentUntilAccepted(t *testing.T) {
 	pool, r := setupHandlers(t)
-	_, tok := testutil.CreateUser(t, pool, "passenger", "legacy") // terms_version 0
+	id, tok := testutil.CreateUser(t, pool, "passenger", "legacy")
+	makeLegacyAccount(t, id)
 
 	login := func() map[string]any {
 		w := testutil.PostJSON(t, r, "/auth/login", "", map[string]any{

@@ -92,10 +92,12 @@ func Login(c *gin.Context) {
 
 	emailAddr := strings.ToLower(strings.TrimSpace(req.Email))
 	var id, hash, role, name string
+	var suspended bool
 	err := db.DB.QueryRow(context.Background(),
-		`SELECT id, password, role, name FROM users WHERE email = $1 AND deleted_at IS NULL`,
+		`SELECT id, password, role, name, suspended_at IS NOT NULL
+		 FROM users WHERE email = $1 AND deleted_at IS NULL`,
 		emailAddr,
-	).Scan(&id, &hash, &role, &name)
+	).Scan(&id, &hash, &role, &name, &suspended)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return
@@ -103,6 +105,12 @@ func Login(c *gin.Context) {
 
 	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)); err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
+		return
+	}
+	// Checked only AFTER the password, so the suspension can't be used to
+	// learn whether an address has an account.
+	if suspended {
+		c.JSON(http.StatusForbidden, gin.H{"error": "this account is suspended", "code": "account_suspended"})
 		return
 	}
 
@@ -122,16 +130,20 @@ func Login(c *gin.Context) {
 func GetProfile(c *gin.Context) {
 	userID := c.GetString("user_id")
 	var u models.User
-	var allowMicroDetour bool
+	var allowMicroDetour, verified bool
+	var photoURL, bio, phone string
+	var emailVerifiedAt *time.Time
 	err := db.DB.QueryRow(context.Background(), `
 		SELECT id, name, email, role,
 		       COALESCE(car_make,''), COALESCE(car_model,''),
 		       COALESCE(car_color,''), COALESCE(car_plate,''),
-		       allow_micro_detour
+		       allow_micro_detour,
+		       COALESCE(photo_url,''), bio, phone, email_verified_at, verified
 		FROM users WHERE id = $1`, userID,
 	).Scan(&u.ID, &u.Name, &u.Email, &u.Role,
 		&u.CarMake, &u.CarModel, &u.CarColor, &u.CarPlate,
-		&allowMicroDetour)
+		&allowMicroDetour,
+		&photoURL, &bio, &phone, &emailVerifiedAt, &verified)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
@@ -154,6 +166,14 @@ func GetProfile(c *gin.Context) {
 		"avg_rating":         avgRating,
 		"rating_count":       ratingCount,
 		"allow_micro_detour": allowMicroDetour,
+		// Read by the Account & Security screen. Before these were returned
+		// (and accepted by UpdateProfile) the screen saved them and silently
+		// got nothing back.
+		"photo_url":         photoURL,
+		"bio":               bio,
+		"phone":             phone,
+		"email_verified_at": emailVerifiedAt,
+		"verified":          verified,
 	})
 }
 
@@ -215,6 +235,10 @@ func UpdateProfile(c *gin.Context) {
 		// Micro-detour opt-in (Round 2 §2) — server-side because it drives
 		// matching, not just presentation.
 		AllowMicroDetour *bool `json:"allow_micro_detour"`
+		// Profile photo download URL from Firebase Storage; "" removes it.
+		PhotoURL *string `json:"photo_url"`
+		Bio      *string `json:"bio"`
+		Phone    *string `json:"phone"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -224,6 +248,19 @@ func UpdateProfile(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "name cannot be empty"})
 		return
 	}
+	if msg := validateProfileFields(req.Name, req.CarMake, req.CarModel, req.CarColor,
+		req.CarPlate, req.PhotoURL, req.Bio, req.Phone); msg != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": msg})
+		return
+	}
+	if req.Bio != nil {
+		b := strings.TrimSpace(*req.Bio)
+		req.Bio = &b
+	}
+	if req.Phone != nil {
+		p := strings.TrimSpace(*req.Phone)
+		req.Phone = &p
+	}
 	userID := c.GetString("user_id")
 	_, err := db.DB.Exec(context.Background(), `
 		UPDATE users SET
@@ -232,10 +269,13 @@ func UpdateProfile(c *gin.Context) {
 		    car_model = COALESCE($3, car_model),
 		    car_color = COALESCE($4, car_color),
 		    car_plate = COALESCE($5, car_plate),
-		    allow_micro_detour = COALESCE($6, allow_micro_detour)
+		    allow_micro_detour = COALESCE($6, allow_micro_detour),
+		    photo_url = CASE WHEN $8::text IS NULL THEN photo_url ELSE NULLIF($8::text, '') END,
+		    bio       = COALESCE($9, bio),
+		    phone     = COALESCE($10, phone)
 		WHERE id = $7`,
 		req.Name, req.CarMake, req.CarModel, req.CarColor, req.CarPlate,
-		req.AllowMicroDetour, userID,
+		req.AllowMicroDetour, userID, req.PhotoURL, req.Bio, req.Phone,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})

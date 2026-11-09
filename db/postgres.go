@@ -487,4 +487,14 @@ const alterSQL = `
 		-- counterparty's ride history, ratings and safety reports keep their
 		-- foreign keys instead of cascading away.
 		ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+
+		-- Account suspension (trust & safety). Set by ops, e.g.:
+		--   UPDATE users SET suspended_at = NOW(), suspended_reason = '...',
+		--                    token_version = token_version + 1
+		--   WHERE id = '<user id>';
+		-- middleware.Auth then answers 403 account_suspended everywhere except
+		-- account deletion, login is refused, and live WebSockets are refused
+		-- on reconnect. Clear both columns to lift it.
+		ALTER TABLE users ADD COLUMN IF NOT EXISTS suspended_at TIMESTAMPTZ;
+		ALTER TABLE users ADD COLUMN IF NOT EXISTS suspended_reason TEXT;
 `

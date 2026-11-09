@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/Pavelbotsu/sameway_backend/middleware"
+	"github.com/Pavelbotsu/sameway_backend/models"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/bcrypt"
@@ -16,17 +17,19 @@ type LatLng struct{ Lat, Lng float64 }
 
 // CreateUser inserts a users row directly + mints a JWT. Returns (id, token).
 // Email is derived from `name` so callers can have many users without thinking.
-// Password is the bcrypted form of "test-pass".
+// Password is the bcrypted form of "test-pass". The user has accepted the
+// current terms and confirmed 18+, like any account created by Register.
 func CreateUser(t testing.TB, pool *pgxpool.Pool, role, name string) (id, token string) {
 	t.Helper()
 	hash, err := bcrypt.GenerateFromPassword([]byte("test-pass"), bcrypt.MinCost)
 	require.NoError(t, err)
 
 	err = pool.QueryRow(context.Background(), `
-		INSERT INTO users (name, email, password, role)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO users (name, email, password, role,
+		                   terms_version, terms_accepted_at, age_confirmed_at)
+		VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
 		RETURNING id
-	`, name, name+"@test.local", string(hash), role).Scan(&id)
+	`, name, name+"@test.local", string(hash), role, models.CurrentTermsVersion).Scan(&id)
 	require.NoError(t, err, "insert user %q", name)
 
 	tok, err := middleware.GenerateToken(id, role)

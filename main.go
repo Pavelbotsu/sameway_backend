@@ -110,15 +110,15 @@ func main() {
 		}
 	}
 
-	r.POST("/ratings", middleware.Auth(), handlers.SubmitRating)
+	r.POST("/ratings", middleware.Auth(), middleware.RequireConsent(), handlers.SubmitRating)
 	// Second line of defence behind the per-ride pickup_attempts cap: stops a
 	// script hammering codes across many rides at once.
-	r.POST("/pickup/confirm", middleware.Auth(),
+	r.POST("/pickup/confirm", middleware.Auth(), middleware.RequireConsent(),
 		middleware.RateLimit("pickup", 10, time.Minute), handlers.ConfirmPickup)
 
 	// Pickup route — accessible to both driver and passenger of the ride.
 	// The handler enforces participant-of-the-row.
-	r.GET("/pickup-route/:request_id", middleware.Auth(), handlers.GetPickupRoute)
+	r.GET("/pickup-route/:request_id", middleware.Auth(), middleware.RequireConsent(), handlers.GetPickupRoute)
 
 	// Mid-ride safety check-in flag. Either party may raise it, so it sits here
 	// rather than in a role group; the handler enforces participant-of-the-row.
@@ -127,7 +127,7 @@ func main() {
 	r.POST("/safety/flag", middleware.Auth(),
 		middleware.RateLimit("safety", 5, time.Minute), handlers.FlagRideSafety)
 
-	driver := r.Group("/driver", middleware.Auth(), middleware.RequireRole("driver"))
+	driver := r.Group("/driver", middleware.Auth(), middleware.RequireConsent(), middleware.RequireRole("driver"))
 	{
 		driver.POST("/route", handlers.SetRoute)
 		driver.POST("/respond", handlers.DriverRespondToRide)
@@ -142,7 +142,7 @@ func main() {
 		driver.DELETE("/trips/:id", handlers.CancelPlannedTrip)
 	}
 
-	passenger := r.Group("/passenger", middleware.Auth(), middleware.RequireRole("passenger"))
+	passenger := r.Group("/passenger", middleware.Auth(), middleware.RequireConsent(), middleware.RequireRole("passenger"))
 	{
 		passenger.PUT("/location", handlers.PassengerUpdateLocation)
 		passenger.POST("/respond", handlers.RespondToRide)
@@ -163,7 +163,7 @@ func main() {
 		passenger.DELETE("/request/:request_id", handlers.PassengerCancelPendingRequest)
 	}
 
-	chat := r.Group("/chat", middleware.Auth())
+	chat := r.Group("/chat", middleware.Auth(), middleware.RequireConsent())
 	{
 		// Conversation-first API (Round 2 §3): persistent pair threads.
 		chat.POST("/conversations", handlers.OpenConversation)
@@ -184,7 +184,7 @@ func main() {
 	// Auth required: the response carries driver identity, car description, and
 	// trip endpoints. Unauthenticated, this was a city-wide harvest of every
 	// driver's name, car, departure point and time.
-	r.POST("/trips/search", middleware.Auth(), handlers.SearchTrips)
+	r.POST("/trips/search", middleware.Auth(), middleware.RequireConsent(), handlers.SearchTrips)
 	r.GET("/promotions", handlers.GetPromotions)
 
 	// Public legal pages and the web account-deletion form. Their URLs go in

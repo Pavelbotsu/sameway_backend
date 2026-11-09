@@ -7,15 +7,13 @@ import (
 	"net/http"
 
 	"github.com/Pavelbotsu/sameway_backend/db"
+	"github.com/Pavelbotsu/sameway_backend/models"
 	"github.com/gin-gonic/gin"
 )
 
-// CurrentTermsVersion is the Terms of Service / Privacy Policy version users
-// must have accepted. Bump it whenever either document changes materially:
-// every login/register response then reports needs_consent=true and the app
-// re-prompts before letting the user continue. The app carries the same
-// number (lib/core/legal.dart kTermsVersion) for its offline check.
-const CurrentTermsVersion = 1
+// CurrentTermsVersion re-exports models.CurrentTermsVersion (the source of
+// truth, shared with middleware.RequireConsent).
+const CurrentTermsVersion = models.CurrentTermsVersion
 
 // The documents are served by the backend rather than bundled in the app so a
 // corrected policy reaches every user without a store release, and so the

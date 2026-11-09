@@ -183,8 +183,13 @@ func HandleWS(c *gin.Context) {
 	// Same revocation check the HTTP middleware runs. Without it a token
 	// invalidated by a password change or role switch could still open a live
 	// event stream for the account.
-	if !middleware.TokenVersionValid(c.Request.Context(), userID, tv) {
+	st, ok := middleware.LoadAccountStatus(c.Request.Context(), userID)
+	if !ok || st.TokenVersion != tv {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "session expired"})
+		return
+	}
+	if st.Suspended {
+		c.JSON(http.StatusForbidden, gin.H{"error": "this account is suspended", "code": "account_suspended"})
 		return
 	}
 

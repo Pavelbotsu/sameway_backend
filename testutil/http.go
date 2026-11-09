@@ -46,12 +46,12 @@ func NewTestRouter() *gin.Engine {
 		auth.POST("/delete-account", middleware.Auth(), handlers.DeleteAccount)
 	}
 
-	r.POST("/ratings", middleware.Auth(), handlers.SubmitRating)
-	r.POST("/pickup/confirm", middleware.Auth(), handlers.ConfirmPickup)
-	r.GET("/pickup-route/:request_id", middleware.Auth(), handlers.GetPickupRoute)
+	r.POST("/ratings", middleware.Auth(), middleware.RequireConsent(), handlers.SubmitRating)
+	r.POST("/pickup/confirm", middleware.Auth(), middleware.RequireConsent(), handlers.ConfirmPickup)
+	r.GET("/pickup-route/:request_id", middleware.Auth(), middleware.RequireConsent(), handlers.GetPickupRoute)
 	r.POST("/safety/flag", middleware.Auth(), handlers.FlagRideSafety)
 
-	driver := r.Group("/driver", middleware.Auth(), middleware.RequireRole("driver"))
+	driver := r.Group("/driver", middleware.Auth(), middleware.RequireConsent(), middleware.RequireRole("driver"))
 	{
 		driver.POST("/route", handlers.SetRoute)
 		driver.POST("/respond", handlers.DriverRespondToRide)
@@ -66,7 +66,7 @@ func NewTestRouter() *gin.Engine {
 		driver.DELETE("/trips/:id", handlers.CancelPlannedTrip)
 	}
 
-	passenger := r.Group("/passenger", middleware.Auth(), middleware.RequireRole("passenger"))
+	passenger := r.Group("/passenger", middleware.Auth(), middleware.RequireConsent(), middleware.RequireRole("passenger"))
 	{
 		passenger.PUT("/location", handlers.PassengerUpdateLocation)
 		passenger.POST("/respond", handlers.RespondToRide)
@@ -81,7 +81,7 @@ func NewTestRouter() *gin.Engine {
 		passenger.DELETE("/request/:request_id", handlers.PassengerCancelPendingRequest)
 	}
 
-	chat := r.Group("/chat", middleware.Auth())
+	chat := r.Group("/chat", middleware.Auth(), middleware.RequireConsent())
 	{
 		chat.POST("/conversations", handlers.OpenConversation)
 		chat.GET("/conversations", handlers.ListConversations)
@@ -95,7 +95,7 @@ func NewTestRouter() *gin.Engine {
 		chat.GET("/:request_id", handlers.GetMessages)
 	}
 
-	r.POST("/trips/search", middleware.Auth(), handlers.SearchTrips)
+	r.POST("/trips/search", middleware.Auth(), middleware.RequireConsent(), handlers.SearchTrips)
 	r.GET("/promotions", handlers.GetPromotions)
 	r.GET("/legal/privacy", handlers.PrivacyPolicy)
 	r.GET("/legal/terms", handlers.TermsOfService)

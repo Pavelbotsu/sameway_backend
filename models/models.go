@@ -7,6 +7,16 @@ const (
 	RolePassenger = "passenger"
 )
 
+// CurrentTermsVersion is the Terms of Service / Privacy Policy version users
+// must have accepted. Bump it whenever either document changes materially:
+// login/register then report needs_consent=true, the app re-prompts, and
+// middleware.RequireConsent refuses ride/chat calls until the user accepts.
+// The app carries the same number (lib/core/legal.dart kTermsVersion).
+//
+// Lives here rather than in handlers so middleware can use it without an
+// import cycle.
+const CurrentTermsVersion = 1
+
 const (
 	StatusLooking    = "looking"
 	StatusFull       = "full"
