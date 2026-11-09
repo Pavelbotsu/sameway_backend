@@ -47,7 +47,9 @@ func main() {
 	// logger writes the raw query string, which would put the WebSocket
 	// handshake's `?token=<jwt>` into the log on every connect.
 	r := gin.New()
-	r.Use(middleware.Logger(), gin.Recovery())
+	// 64 KB is far above any legitimate JSON body here; without a cap a single
+	// request could stream an unbounded body into the JSON decoder.
+	r.Use(middleware.Logger(), gin.Recovery(), middleware.BodyLimit(64<<10))
 	// TLS terminates at the reverse proxy (Caddy), which is the ONLY thing that
 	// can reach this container — docker-compose.prod.yml publishes no ports for
 	// the app service. Trusting the private ranges therefore trusts exactly that
@@ -81,7 +83,8 @@ func main() {
 		auth.POST("/forgot-password", middleware.RateLimit("forgot", 5, time.Minute), handlers.ForgotPassword)
 		auth.POST("/reset-password", middleware.RateLimit("reset", 10, time.Minute), handlers.ResetPassword)
 		auth.GET("/profile", middleware.Auth(), handlers.GetProfile)
-		auth.PUT("/profile", middleware.Auth(), handlers.UpdateProfile)
+		auth.PUT("/profile", middleware.Auth(),
+			middleware.RateLimit("profile", 20, time.Minute), handlers.UpdateProfile)
 		auth.POST("/switch-role", middleware.Auth(), handlers.SwitchRole)
 		auth.PUT("/fcm-token", middleware.Auth(), handlers.UpdateFCMToken)
 		auth.GET("/stats", middleware.Auth(), handlers.GetStats)
@@ -110,7 +113,8 @@ func main() {
 		}
 	}
 
-	r.POST("/ratings", middleware.Auth(), middleware.RequireConsent(), handlers.SubmitRating)
+	r.POST("/ratings", middleware.Auth(), middleware.RequireConsent(),
+		middleware.RateLimit("ratings", 10, time.Minute), handlers.SubmitRating)
 	// Second line of defence behind the per-ride pickup_attempts cap: stops a
 	// script hammering codes across many rides at once.
 	r.POST("/pickup/confirm", middleware.Auth(), middleware.RequireConsent(),
@@ -129,7 +133,9 @@ func main() {
 
 	driver := r.Group("/driver", middleware.Auth(), middleware.RequireConsent(), middleware.RequireRole("driver"))
 	{
-		driver.POST("/route", handlers.SetRoute)
+		// Each call = an OSRM route + the heaviest matching query + up to 3
+		// via-routes for micro-detour; a few per minute is generous.
+		driver.POST("/route", middleware.RateLimit("set-route", 10, time.Minute), handlers.SetRoute)
 		driver.POST("/respond", handlers.DriverRespondToRide)
 		driver.PUT("/location", handlers.UpdateLocation)
 		driver.GET("/requests", handlers.GetRequests)
@@ -137,7 +143,7 @@ func main() {
 		driver.POST("/dropoff/:request_id", handlers.DropoffPassenger)
 		driver.DELETE("/route", handlers.DeleteRoute)
 		driver.DELETE("/ride/:request_id", handlers.DriverCancelRide)
-		driver.POST("/trips", handlers.PlanTrip)
+		driver.POST("/trips", middleware.RateLimit("plan-trip", 10, time.Minute), handlers.PlanTrip)
 		driver.GET("/trips", handlers.GetMyPlannedTrips)
 		driver.DELETE("/trips/:id", handlers.CancelPlannedTrip)
 	}
@@ -151,7 +157,9 @@ func main() {
 		passenger.POST("/nearby-drivers",
 			middleware.RateLimit("nearby", 20, time.Minute), handlers.NearbyDrivers)
 		passenger.POST("/search", handlers.PassengerSearch)
-		passenger.POST("/request-driver", handlers.RequestDriver)
+		// Each request pushes a notification to the driver.
+		passenger.POST("/request-driver",
+			middleware.RateLimit("request-driver", 10, time.Minute), handlers.RequestDriver)
 		// The costliest query in the codebase (101-step generate_series over
 		// geodesic ops) — never leave it unbounded.
 		passenger.POST("/reposition",
@@ -169,7 +177,9 @@ func main() {
 		chat.POST("/conversations", handlers.OpenConversation)
 		chat.GET("/conversations", handlers.ListConversations)
 		chat.GET("/conversations/:id/messages", handlers.GetConversationMessages)
-		chat.POST("/send", handlers.SendMessage)
+		// Overall ceiling; pairs without a completed ride also have the
+		// tighter per-conversation pre-ride limit inside the handler.
+		chat.POST("/send", middleware.RateLimit("chat-send", 30, time.Minute), handlers.SendMessage)
 		// Typing is a pure WS amplifier — one cheap POST pushes an event to the
 		// peer, so it needs its own ceiling independent of the message limit.
 		chat.POST("/typing", middleware.RateLimit("typing", 30, time.Minute), handlers.TypingStatus)
@@ -184,7 +194,8 @@ func main() {
 	// Auth required: the response carries driver identity, car description, and
 	// trip endpoints. Unauthenticated, this was a city-wide harvest of every
 	// driver's name, car, departure point and time.
-	r.POST("/trips/search", middleware.Auth(), middleware.RequireConsent(), handlers.SearchTrips)
+	r.POST("/trips/search", middleware.Auth(), middleware.RequireConsent(),
+		middleware.RateLimit("trip-search", 30, time.Minute), handlers.SearchTrips)
 	r.GET("/promotions", handlers.GetPromotions)
 
 	// Public legal pages and the web account-deletion form. Their URLs go in
