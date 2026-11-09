@@ -390,6 +390,13 @@ func RequestDriver(c *gin.Context) {
 
 	ctx := c.Request.Context()
 
+	// Blocked either way: answer exactly like an unavailable driver, so the
+	// block itself isn't revealed.
+	if isBlockedPair(ctx, passengerID, req.DriverID) {
+		c.JSON(http.StatusConflict, gin.H{"error": "driver is not available"})
+		return
+	}
+
 	var paxLat, paxLng float64
 	if err := db.DB.QueryRow(ctx, `
 		SELECT ST_Y(location::geometry), ST_X(location::geometry)

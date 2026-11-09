@@ -92,6 +92,11 @@ func reverseMatchForPassenger(passengerID string) {
 		  AND ad.current_location IS NOT NULL
 		  AND ad.current_location_at > NOW() - make_interval(secs => $2::float8)
 		  AND ad.driver_id <> $1
+		  AND NOT EXISTS (
+		      SELECT 1 FROM user_blocks b
+		      WHERE (b.blocker_id = $1 AND b.blocked_id = ad.driver_id)
+		         OR (b.blocker_id = ad.driver_id AND b.blocked_id = $1)
+		  )
 		  -- Constant radius so the GIST index on route is usable (the old
 		  -- GREATEST(corridor_km*1000, …) forced a seq scan: 88 ms → 5 ms at
 		  -- 5k in the audit bench). Same candidates in practice: the corridor

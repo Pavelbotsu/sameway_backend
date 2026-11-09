@@ -214,6 +214,12 @@ func findPassengersInCorridor(driverID, routeWKT string, corridorKm, destLat, de
 			  -- Never match the driver's own passenger row (stale state after a
 			  -- role switch would otherwise let a driver corridor-match themself).
 			  AND u.id <> $1
+			  -- A block in either direction ends all contact, not just chat.
+			  AND NOT EXISTS (
+			      SELECT 1 FROM user_blocks b
+			      WHERE (b.blocker_id = $1 AND b.blocked_id = u.id)
+			         OR (b.blocker_id = u.id AND b.blocked_id = $1)
+			  )
 			  -- Only a committed engagement removes a passenger from the pool.
 			  -- An un-answered 'offered' row does NOT: multiple drivers may offer
 			  -- concurrently (the passenger picks), otherwise the first broadcast
@@ -447,6 +453,12 @@ func FindNearMissCandidates(driverID, routeWKT string, corridorKm float64, limit
 			WHERE ST_DWithin(ap.location::geography, ST_GeogFromText($2), GREATEST($3::float8, $10::float8))
 			  AND ap.updated_at > NOW() - INTERVAL '10 minutes'
 			  AND u.id <> $1
+			  -- A block in either direction ends all contact, not just chat.
+			  AND NOT EXISTS (
+			      SELECT 1 FROM user_blocks b
+			      WHERE (b.blocker_id = $1 AND b.blocked_id = u.id)
+			         OR (b.blocker_id = u.id AND b.blocked_id = $1)
+			  )
 			  AND NOT EXISTS (
 			      SELECT 1 FROM ride_requests rr
 			      WHERE rr.passenger_id = u.id
@@ -899,6 +911,12 @@ func GetNearbyDrivers(lat, lng, radiusKm, destLat, destLng, destRadiusKm float64
 		AND ad.status = 'looking'
 		AND ad.created_at > NOW() - INTERVAL '30 minutes'
 		AND ad.driver_id <> $7
+		-- Hide drivers the caller blocked, or who blocked the caller.
+		AND NOT EXISTS (
+		    SELECT 1 FROM user_blocks b
+		    WHERE (b.blocker_id = $7 AND b.blocked_id = ad.driver_id)
+		       OR (b.blocker_id = ad.driver_id AND b.blocked_id = $7)
+		)
 	`, lat, lng, radiusKm, destLat, destLng, destRadiusKm, callerID,
 		config.C.MatchWalkCapM,      // $8
 		config.C.MatchWalkLongM,     // $9
