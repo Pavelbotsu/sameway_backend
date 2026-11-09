@@ -162,8 +162,15 @@ func findPassengersInCorridor(driverID, routeWKT string, corridorKm, destLat, de
 		-- must stay mutually consistent; lengths transform back to geography to
 		-- stay true metres, and points transform back to 4326 before touching
 		-- route_m (which is a 4326 LINESTRING M).
-		WITH rd AS (
+		--
+		-- Performance: route_p is the STORED projection (active_drivers.
+		-- route_3857, kept by trigger) and rd/ri are MATERIALIZED. Postgres
+		-- otherwise inlines these one-row CTEs into every candidate row and
+		-- recomputes them there — the audit measured 2 061 ms → 419 ms at 5k
+		-- active passengers with identical results.
+		WITH rd AS MATERIALIZED (
 			SELECT ad.route::geometry          AS route_geom,
+			       ad.route_3857               AS route_p,
 			       ad.route_m                  AS route_m,
 			       ad.current_location::geometry AS cur_geom,
 			       ST_Length(ad.route)         AS len_m
@@ -171,14 +178,14 @@ func findPassengersInCorridor(driverID, routeWKT string, corridorKm, destLat, de
 			WHERE ad.driver_id = $1
 			  AND ad.current_location IS NOT NULL
 			  AND ad.route_m IS NOT NULL
+			  AND ad.route_3857 IS NOT NULL
 			  AND ad.current_location_at > NOW() - make_interval(secs => $4::float8)
 		),
-		ri AS (
-			SELECT rd.route_geom, rd.route_m, rd.len_m, t.route_p,
-			       ST_LineLocatePoint(t.route_p, ST_Transform(rd.cur_geom, 3857)) AS dfrac,
-			       ST_InterpolatePoint(rd.route_m, rd.cur_geom)                   AS dt
+		ri AS MATERIALIZED (
+			SELECT rd.route_geom, rd.route_m, rd.len_m, rd.route_p,
+			       ST_LineLocatePoint(rd.route_p, ST_Transform(rd.cur_geom, 3857)) AS dfrac,
+			       ST_InterpolatePoint(rd.route_m, rd.cur_geom)                    AS dt
 			FROM rd
-			CROSS JOIN LATERAL (SELECT ST_Transform(rd.route_geom, 3857) AS route_p) t
 		),
 		c AS (
 			SELECT u.id, u.name, COALESCE(u.fcm_token,'') AS fcm_token,
@@ -393,22 +400,25 @@ func FindNearMissCandidates(driverID, routeWKT string, corridorKm float64, limit
 		-- findPassengersInCorridor. The gates here must stay numerically
 		-- identical to that query's or "near miss" stops meaning "failed the
 		-- walk cap and nothing else".
-		WITH rd AS (
+		-- Stored projection + MATERIALIZED, as in findPassengersInCorridor
+		-- (measured 624 ms → 117 ms at 5k active passengers).
+		WITH rd AS MATERIALIZED (
 			SELECT ad.route::geometry            AS route_geom,
+			       ad.route_3857                 AS route_p,
 			       ad.route_m                    AS route_m,
 			       ad.current_location::geometry AS cur_geom
 			FROM active_drivers ad
 			WHERE ad.driver_id = $1
 			  AND ad.current_location IS NOT NULL
 			  AND ad.route_m IS NOT NULL
+			  AND ad.route_3857 IS NOT NULL
 			  AND ad.current_location_at > NOW() - make_interval(secs => $4::float8)
 		),
-		ri AS (
-			SELECT rd.route_geom, rd.route_m, t.route_p,
-			       ST_LineLocatePoint(t.route_p, ST_Transform(rd.cur_geom, 3857)) AS dfrac,
-			       ST_InterpolatePoint(rd.route_m, rd.cur_geom)                   AS dt
+		ri AS MATERIALIZED (
+			SELECT rd.route_geom, rd.route_m, rd.route_p,
+			       ST_LineLocatePoint(rd.route_p, ST_Transform(rd.cur_geom, 3857)) AS dfrac,
+			       ST_InterpolatePoint(rd.route_m, rd.cur_geom)                    AS dt
 			FROM rd
-			CROSS JOIN LATERAL (SELECT ST_Transform(rd.route_geom, 3857) AS route_p) t
 		),
 		c AS (
 			SELECT u.id, u.name, COALESCE(u.fcm_token,'') AS fcm_token,
@@ -637,7 +647,7 @@ func GetDriverRequests(driverID string) ([]models.RideRequest, error) {
 			           LEAST(f.pickup_frac, f.dropoff_frac),
 			           GREATEST(f.pickup_frac, f.dropoff_frac)
 			       ), 4326)::geography) AS carry_m
-			FROM (SELECT ST_Transform(ad.route::geometry, 3857) AS route_p) rp
+			FROM (SELECT ad.route_3857 AS route_p) rp
 			CROSS JOIN LATERAL (
 				-- partial_relay stores an explicit relay drop-off; everything
 				-- else projects the passenger's declared destination onto the
@@ -733,7 +743,7 @@ func DeleteActiveDriver(driverID string) error {
 //   - only the first name is shown and the plate is withheld until accept.
 const (
 	PrivacyGridDeg = 0.005
-	PrivacyTrimM   = 300.0
+	PrivacyTrimM   = 300.0 // mirrored in the active_drivers_derive_route trigger
 )
 
 // SnapToPrivacyGrid rounds a coordinate to the PrivacyGridDeg grid, matching
@@ -806,14 +816,10 @@ func GetNearbyDrivers(lat, lng, radiusKm, destLat, destLng, destRadiusKm float64
 		       ad.corridor_km, ad.seats,
 		       COALESCE(u.car_make,''), COALESCE(u.car_model,''),
 		       COALESCE(u.car_color,''),
-		       -- Trim $14 metres off each end (capped so short routes keep
-		       -- their middle 10%), then ~50 m simplification: keeps the shape
-		       -- for the map overlay, drops the track and the endpoints.
-		       COALESCE(ST_AsText(ST_SimplifyPreserveTopology(
-		           ST_LineSubstring(ad.route::geometry,
-		               LEAST($14::float8 / NULLIF(ST_Length(ad.route), 0), 0.45),
-		               GREATEST(1 - $14::float8 / NULLIF(ST_Length(ad.route), 0), 0.55)),
-		           0.0005)), ''),
+		       -- Trimmed by PrivacyTrimM at each end and simplified ~50 m,
+		       -- precomputed by trigger at SetRoute (db/postgres.go) instead of
+		       -- on every 10-second poll of every passenger.
+		       COALESCE(ad.route_public_wkt, ''),
 		       COALESCE(lm.likely, false),
 		       COALESCE(lm.walk_m, -1),
 		       COALESCE(lm.carry_m, 0),
@@ -861,7 +867,7 @@ func GetNearbyDrivers(lat, lng, radiusKm, destLat, destLng, destRadiusKm float64
 				-- 3857 like the corridor query: this hint is meant to predict
 				-- what the real matcher will decide, so it has to project the
 				-- same way or it will disagree with it on diagonal routes.
-				FROM (SELECT ST_Transform(ad.route::geometry, 3857)    AS g,
+				FROM (SELECT ad.route_3857                             AS g,
 				             ST_Transform(ap.location::geometry, 3857) AS pax_p) rg
 				LEFT JOIN LATERAL (
 					SELECT ST_LineLocatePoint(rg.g, ST_Transform(dp.p, 3857)) AS dropoff_frac,
@@ -872,7 +878,13 @@ func GetNearbyDrivers(lat, lng, radiusKm, destLat, destLng, destRadiusKm float64
 					      WHERE ap.destination_lat IS NOT NULL) dp
 				) dd ON TRUE
 			) s
-			WHERE ap.passenger_id IS NOT NULL AND ad.route IS NOT NULL
+			WHERE ap.passenger_id IS NOT NULL AND ad.route_3857 IS NOT NULL
+			  -- likely_match requires walk_in < the walk cap (≤ $9), so a
+			  -- route farther than $9 can never be "likely": skip the
+			  -- per-driver geometry for it (index-assisted, measured 2.6×
+			  -- faster at 5k with the stored WKT). walk_m/carry_m then read
+			  -- -1/0 for those drivers, which the app treats as unknown.
+			  AND ST_DWithin(ad.route, ap.location, $9::float8)
 		) lm ON TRUE
 		WHERE ST_DWithin(
 			ad.origin::geography,
@@ -894,7 +906,6 @@ func GetNearbyDrivers(lat, lng, radiusKm, destLat, destLng, destRadiusKm float64
 		config.C.MatchCarryK,        // $11
 		config.C.MatchLocFreshS,     // $12
 		PrivacyGridDeg,              // $13
-		PrivacyTrimM,                // $14
 	)
 	if err != nil {
 		return nil, err

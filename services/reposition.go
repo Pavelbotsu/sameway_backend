@@ -46,9 +46,9 @@ func RepositionPickup(driverID, passengerID string) (RepositionResult, bool, err
 		-- would pick the wrong point on any route that is not axis-aligned.
 		WITH ad AS (
 			SELECT route::geometry AS rg_4326,
-			       ST_Transform(route::geometry, 3857) AS rg,
+			       route_3857 AS rg,
 			       route_m AS rm, ST_Length(route) AS len,
-			       ST_LineLocatePoint(ST_Transform(route::geometry, 3857),
+			       ST_LineLocatePoint(route_3857,
 			           ST_Transform(current_location::geometry, 3857)) AS dfrac,
 			       ST_InterpolatePoint(route_m, current_location::geometry) AS dt
 			FROM active_drivers

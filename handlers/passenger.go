@@ -429,7 +429,7 @@ func RequestDriver(c *gin.Context) {
 		FROM active_passengers ap
 		JOIN active_drivers ad ON ad.driver_id = $2
 		CROSS JOIN LATERAL (
-		    SELECT ST_Transform(ad.route::geometry, 3857)     AS route_p,
+		    SELECT ad.route_3857                         AS route_p,
 		           ST_Transform(ap.location::geometry, 3857)  AS pax_p
 		) rp
 		CROSS JOIN LATERAL (

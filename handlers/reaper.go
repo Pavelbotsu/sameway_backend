@@ -98,7 +98,7 @@ func reapPassedPickups() {
 		-- This decides whether a ride is killed as "driver already passed you",
 		-- and a degree-space projection can flip that sign near the boundary.
 		CROSS JOIN LATERAL (
-		    SELECT ST_Transform(ad.route::geometry, 3857) AS route_p
+		    SELECT ad.route_3857 AS route_p
 		) rp
 		CROSS JOIN LATERAL (
 		    SELECT ST_LineLocatePoint(rp.route_p, ST_Transform(ad.current_location::geometry, 3857)) AS df

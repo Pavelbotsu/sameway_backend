@@ -497,4 +497,45 @@ const alterSQL = `
 		-- on reconnect. Clear both columns to lift it.
 		ALTER TABLE users ADD COLUMN IF NOT EXISTS suspended_at TIMESTAMPTZ;
 		ALTER TABLE users ADD COLUMN IF NOT EXISTS suspended_reason TEXT;
+
+		-- ── Derived route geometry (performance + privacy) ────────────────────
+		-- route_3857: the route projected once to Web Mercator. Every matching
+		-- query works in 3857 (see the CRS note in services.findPassengersIn
+		-- Corridor); recomputing ST_Transform(route) inside them ran PER
+		-- CANDIDATE ROW, because Postgres inlines CTEs — 95 transforms in one
+		-- corridor plan, ~2 s per query at 5k active passengers (audit bench).
+		-- route_public_wkt: what other users may see before a match — trimmed
+		-- 300 m at both ends (services.PrivacyTrimM) and simplified ~50 m —
+		-- computed once instead of on every nearby-drivers poll.
+		-- A trigger keeps both in step with every write of route, whoever
+		-- writes it.
+		ALTER TABLE active_drivers ADD COLUMN IF NOT EXISTS route_3857 geometry(LineString,3857);
+		ALTER TABLE active_drivers ADD COLUMN IF NOT EXISTS route_public_wkt TEXT;
+
+		CREATE OR REPLACE FUNCTION active_drivers_derive_route() RETURNS trigger AS $$
+		DECLARE
+			trim_frac double precision;
+		BEGIN
+			IF NEW.route IS NULL THEN
+				NEW.route_3857 := NULL;
+				NEW.route_public_wkt := NULL;
+				RETURN NEW;
+			END IF;
+			NEW.route_3857 := ST_Transform(NEW.route::geometry, 3857);
+			trim_frac := 300.0 / NULLIF(ST_Length(NEW.route), 0);
+			NEW.route_public_wkt := ST_AsText(ST_SimplifyPreserveTopology(
+				ST_LineSubstring(NEW.route::geometry,
+					LEAST(trim_frac, 0.45), GREATEST(1 - trim_frac, 0.55)),
+				0.0005));
+			RETURN NEW;
+		END;
+		$$ LANGUAGE plpgsql;
+
+		CREATE OR REPLACE TRIGGER trg_active_drivers_derive_route
+			BEFORE INSERT OR UPDATE OF route ON active_drivers
+			FOR EACH ROW EXECUTE FUNCTION active_drivers_derive_route();
+
+		-- One-time backfill for rows written before the trigger existed.
+		UPDATE active_drivers SET route = route
+		WHERE route IS NOT NULL AND route_3857 IS NULL;
 `

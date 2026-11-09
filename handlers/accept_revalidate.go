@@ -29,7 +29,7 @@ func pickupStillAhead(ctx context.Context, tx pgx.Tx, requestID string) (aheadM 
 		FROM ride_requests rr
 		JOIN active_drivers ad ON ad.driver_id = rr.driver_id
 		CROSS JOIN LATERAL (
-		    SELECT ST_Transform(ad.route::geometry, 3857) AS route_p
+		    SELECT ad.route_3857 AS route_p
 		) rp
 		CROSS JOIN LATERAL (
 		    SELECT ST_LineLocatePoint(rp.route_p, ST_Transform(rr.pickup_location::geometry, 3857)) AS pf,
