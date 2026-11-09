@@ -14,6 +14,7 @@ package email
 
 import (
 	"context"
+	"log"
 
 	"github.com/Pavelbotsu/sameway_backend/config"
 )
@@ -33,5 +34,8 @@ func Init(cfg config.Config) {
 		Active = NewResendSender(cfg)
 		return
 	}
-	Active = &NoopSender{}
+	if cfg.IsProd() {
+		log.Printf("email: RESEND_API_KEY/EMAIL_FROM not set — password-reset and verification emails will NOT be sent")
+	}
+	Active = &NoopSender{Redact: cfg.IsProd()}
 }
