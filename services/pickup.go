@@ -18,6 +18,10 @@ type pgQueryer interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 
+// NewPickupCode returns a fresh random 4-digit pickup code (used when the
+// driver regenerates a locked code).
+func NewPickupCode() string { return generatePickupCode() }
+
 // generatePickupCode returns a 4-digit string (0000-9999) seeded from
 // crypto/rand. Leading zeros are preserved.
 func generatePickupCode() string {

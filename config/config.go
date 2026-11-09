@@ -115,6 +115,14 @@ type Config struct {
 	MatchDetourNearMissM float64
 	// Max OSRM via-route evaluations per corridor run (cost control).
 	MatchDetourMaxCandidates int
+
+	// ── Pickup / no-show ──
+	// A driver may report a no-show once a ride has been accepted for at
+	// least MatchNoShowWaitS without the pickup being confirmed.
+	MatchNoShowWaitS float64
+	// An accepted ride never picked up is cancelled after this long, so a
+	// forgotten ride doesn't hold a seat (and the passenger) forever.
+	AcceptedTimeoutMinutes int
 }
 
 var C Config
@@ -187,6 +195,9 @@ func Load() {
 		MatchMaxDetourTotalS:     getEnvFloat("MATCH_MAX_DETOUR_TOTAL_S", 180),
 		MatchDetourNearMissM:     getEnvFloat("MATCH_DETOUR_NEAR_MISS_M", 1500),
 		MatchDetourMaxCandidates: getEnvInt("MATCH_DETOUR_MAX_CANDIDATES", 3),
+
+		MatchNoShowWaitS:       getEnvFloat("MATCH_NO_SHOW_WAIT_S", 300),
+		AcceptedTimeoutMinutes: getEnvInt("ACCEPTED_TIMEOUT_MINUTES", 60),
 	}
 }
 

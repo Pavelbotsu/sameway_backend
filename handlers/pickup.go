@@ -84,32 +84,62 @@ func ConfirmPickup(c *gin.Context) {
 	// passenger could script their way to "picked up" without ever meeting the
 	// driver, which defeats the entire handshake. Mirrors the attempts cap the
 	// reset/verification codes already carry.
+	//
+	// Once locked, only the driver can unlock it (POST /driver/pickup-code/
+	// :id/regenerate issues a new code and resets the counter) — there used to
+	// be no way out at all, so a locked ride sat in `accepted` forever.
 	if attempts >= pickupMaxAttempts {
-		c.JSON(http.StatusTooManyRequests,
-			gin.H{"error": "too many incorrect codes — ask the driver to restart the pickup"})
+		respondPickupLocked(c)
 		return
 	}
 	codeOK := pickupCode != nil && *pickupCode != "" &&
 		subtle.ConstantTimeCompare([]byte(*pickupCode), []byte(req.Code)) == 1
 	if !codeOK {
-		if _, err := db.DB.Exec(ctx,
-			`UPDATE ride_requests SET pickup_attempts = pickup_attempts + 1 WHERE id = $1`,
-			req.RequestID,
-		); err != nil {
-			log.Printf("ConfirmPickup: bump attempts for %s: %v", req.RequestID, err)
+		// Atomic check-and-increment: parallel guesses can't each pass a stale
+		// "attempts < max" read and exceed the cap.
+		var now int
+		err := db.DB.QueryRow(ctx, `
+			UPDATE ride_requests SET pickup_attempts = pickup_attempts + 1
+			WHERE id = $1 AND status = 'accepted' AND pickup_attempts < $2
+			RETURNING pickup_attempts`, req.RequestID, pickupMaxAttempts,
+		).Scan(&now)
+		if errors.Is(err, pgx.ErrNoRows) {
+			respondPickupLocked(c)
+			return
 		}
-		c.JSON(http.StatusBadRequest, gin.H{"error": "wrong code"})
+		if err != nil {
+			log.Printf("ConfirmPickup: bump attempts for %s: %v", req.RequestID, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+			return
+		}
+		if now >= pickupMaxAttempts {
+			// Tell the driver now, so their screen offers a new code before
+			// the passenger even asks.
+			Hub.SendToUser(driverID, "pickup_locked", gin.H{"request_id": req.RequestID})
+			respondPickupLocked(c)
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "wrong code", "code": "wrong_code",
+			"attempts_left": pickupMaxAttempts - now,
+		})
 		return
 	}
 
-	// Flip status and stamp the pickup time. The partial unique index already
-	// covers in_progress so we don't need to worry about competing accepts.
-	if _, err := db.DB.Exec(ctx, `
+	// Flip status and stamp the pickup time. Guarded on the lock too, so a
+	// lockout reached by a parallel request between the read above and here
+	// still holds.
+	tag, err := db.DB.Exec(ctx, `
 		UPDATE ride_requests
 		SET status = 'in_progress', picked_up_at = NOW()
-		WHERE id = $1
-	`, req.RequestID); err != nil {
+		WHERE id = $1 AND status = 'accepted' AND pickup_attempts < $2
+	`, req.RequestID, pickupMaxAttempts)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		respondPickupLocked(c)
 		return
 	}
 
@@ -120,4 +150,12 @@ func ConfirmPickup(c *gin.Context) {
 	})
 
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func respondPickupLocked(c *gin.Context) {
+	c.JSON(http.StatusTooManyRequests, gin.H{
+		"error":         "too many incorrect codes — ask the driver for a new code",
+		"code":          "pickup_locked",
+		"attempts_left": 0,
+	})
 }

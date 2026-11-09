@@ -579,4 +579,8 @@ const alterSQL = `
 		-- One-time backfill for rows written before the trigger existed.
 		UPDATE active_drivers SET route = route
 		WHERE route IS NOT NULL AND route_3857 IS NULL;
+
+		-- Why a ride ended when it was cancelled by the system or for a no-show
+		-- (no_show, expired): kept for ops review and the no-show rate metric.
+		ALTER TABLE ride_requests ADD COLUMN IF NOT EXISTS cancel_reason TEXT;
 `

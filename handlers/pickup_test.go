@@ -242,15 +242,20 @@ func TestPickupConfirm_BruteForceCapped(t *testing.T) {
 	if wrong == code {
 		wrong = "1111"
 	}
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 4; i++ {
 		w := testutil.PostJSON(t, r, "/pickup/confirm", paxTok, map[string]any{
 			"request_id": reqID, "code": wrong,
 		})
 		require.Equal(t, http.StatusBadRequest, w.Code, "attempt %d", i+1)
 	}
+	// The 5th wrong guess uses up the last attempt and says so straight away.
+	w := testutil.PostJSON(t, r, "/pickup/confirm", paxTok, map[string]any{
+		"request_id": reqID, "code": wrong,
+	})
+	assert.Equal(t, http.StatusTooManyRequests, w.Code)
 
 	// Cap reached: further guesses are refused outright...
-	w := testutil.PostJSON(t, r, "/pickup/confirm", paxTok, map[string]any{
+	w = testutil.PostJSON(t, r, "/pickup/confirm", paxTok, map[string]any{
 		"request_id": reqID, "code": wrong,
 	})
 	assert.Equal(t, http.StatusTooManyRequests, w.Code)

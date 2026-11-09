@@ -62,6 +62,8 @@ func NewTestRouter() *gin.Engine {
 		driver.POST("/dropoff/:request_id", handlers.DropoffPassenger)
 		driver.DELETE("/route", handlers.DeleteRoute)
 		driver.DELETE("/ride/:request_id", handlers.DriverCancelRide)
+		driver.POST("/pickup-code/:request_id/regenerate", handlers.RegeneratePickupCode)
+		driver.POST("/no-show/:request_id", handlers.ReportNoShow)
 		driver.POST("/trips", handlers.PlanTrip)
 		driver.GET("/trips", handlers.GetMyPlannedTrips)
 		driver.DELETE("/trips/:id", handlers.CancelPlannedTrip)

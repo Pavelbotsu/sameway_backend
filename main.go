@@ -146,6 +146,11 @@ func main() {
 		driver.POST("/dropoff/:request_id", handlers.DropoffPassenger)
 		driver.DELETE("/route", handlers.DeleteRoute)
 		driver.DELETE("/ride/:request_id", handlers.DriverCancelRide)
+		// Way out of a pickup-code lockout: a new code, attempts reset.
+		driver.POST("/pickup-code/:request_id/regenerate",
+			middleware.RateLimit("pickup-regen", 10, time.Minute), handlers.RegeneratePickupCode)
+		// Passenger never showed: allowed after MATCH_NO_SHOW_WAIT_S.
+		driver.POST("/no-show/:request_id", handlers.ReportNoShow)
 		driver.POST("/trips", middleware.RateLimit("plan-trip", 10, time.Minute), handlers.PlanTrip)
 		driver.GET("/trips", handlers.GetMyPlannedTrips)
 		driver.DELETE("/trips/:id", handlers.CancelPlannedTrip)

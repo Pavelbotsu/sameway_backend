@@ -27,6 +27,7 @@ func ReapPendingRideRequests(timeoutMinutes int) {
 		// whole server (and every WS connection) down with it.
 		safeGo("reaper-sweep", func() {
 			ReapStalePendingOnce(timeoutMinutes)
+			ExpireStaleAcceptedOnce(context.Background())
 			ReapIdleConversationsOnce()
 			sweepLiveLocThrottle()
 			sweepCorridorRerunThrottle()
