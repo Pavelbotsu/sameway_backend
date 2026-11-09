@@ -99,6 +99,9 @@ func main() {
 		// In-app account deletion (Play + App Store requirement). Password is
 		// re-checked; the limit just stops a stolen token being used to
 		// brute-force it.
+		// Revokes this and every other session of the account, and unbinds the
+		// push token so the device stops getting the account's notifications.
+		auth.POST("/logout", middleware.Auth(), handlers.Logout)
 		auth.POST("/delete-account", middleware.Auth(),
 			middleware.RateLimit("delete-account", 5, time.Minute), handlers.DeleteAccount)
 

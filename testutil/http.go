@@ -43,6 +43,7 @@ func NewTestRouter() *gin.Engine {
 		auth.POST("/email-verify/request", middleware.Auth(), handlers.RequestEmailVerify)
 		auth.POST("/email-verify/confirm", middleware.Auth(), handlers.ConfirmEmailVerify)
 		auth.POST("/consent", middleware.Auth(), handlers.AcceptTerms)
+		auth.POST("/logout", middleware.Auth(), handlers.Logout)
 		auth.POST("/delete-account", middleware.Auth(), handlers.DeleteAccount)
 	}
 

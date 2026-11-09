@@ -38,9 +38,9 @@ func Auth() gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "session expired"})
 			return
 		}
-		// A suspended user keeps exactly one door open: deleting their account
+		// A suspended user may still sign out and delete their account
 		// (GDPR erasure doesn't stop at a suspension).
-		if st.Suspended && c.FullPath() != "/auth/delete-account" {
+		if st.Suspended && c.FullPath() != "/auth/delete-account" && c.FullPath() != "/auth/logout" {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 				"error": "this account is suspended", "code": "account_suspended",
 			})

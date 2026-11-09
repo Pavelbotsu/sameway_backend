@@ -192,6 +192,25 @@ func runDeletion(ctx context.Context, userID string) error {
 	return nil
 }
 
+// Logout handles POST /auth/logout. JWTs are stateless, so "logging out"
+// used to mean only that the app forgot its token: the token kept working
+// until it expired, and the device kept receiving the account's ride and chat
+// pushes. Bumping token_version revokes every session of the account (the
+// app re-logs in the device it's on), clearing fcm_token stops the pushes,
+// and the live WebSocket is closed.
+func Logout(c *gin.Context) {
+	userID := c.GetString("user_id")
+	if _, err := db.DB.Exec(c.Request.Context(), `
+		UPDATE users SET token_version = token_version + 1, fcm_token = NULL
+		WHERE id = $1`, userID); err != nil {
+		log.Printf("Logout %s: %v", userID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	Hub.Disconnect(userID)
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
 // DeleteAccount handles POST /auth/delete-account (in-app). The password is
 // re-checked so a stolen session token alone can't destroy the account.
 // A wrong password is 403, not 401: the app treats any 401 on an
