@@ -259,7 +259,7 @@ func TestRideDoneClearsSeats(t *testing.T) {
 	reqID, _, err := services.CreateRideRequest(driverID, passengerID, 50, 20)
 	require.NoError(t, err)
 	_, err = pool.Exec(t.Context(),
-		`UPDATE ride_requests SET status = 'accepted' WHERE id = $1`, reqID)
+		`UPDATE ride_requests SET status = 'in_progress' WHERE id = $1`, reqID)
 	require.NoError(t, err)
 	_, err = pool.Exec(t.Context(),
 		`UPDATE active_drivers SET seats_taken = 1 WHERE driver_id = $1`, driverID)

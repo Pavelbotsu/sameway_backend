@@ -173,7 +173,7 @@ func TestDropoff_FlipsFullBackToLooking(t *testing.T) {
 	reqID, _, err := services.CreateRideRequest(driverID, passengerID, 50, 20)
 	require.NoError(t, err)
 	_, err = pool.Exec(ctx(t),
-		`UPDATE ride_requests SET status = 'accepted' WHERE id = $1`, reqID)
+		`UPDATE ride_requests SET status = 'in_progress' WHERE id = $1`, reqID)
 	require.NoError(t, err)
 	_, err = pool.Exec(ctx(t),
 		`UPDATE active_drivers SET seats_taken = 3, status = 'full' WHERE driver_id = $1`,
@@ -341,4 +341,63 @@ func TestReaper_StalePendingStillExpires(t *testing.T) {
 	require.NoError(t, pool.QueryRow(ctx(t),
 		`SELECT status FROM ride_requests WHERE id = $1`, reqID).Scan(&status))
 	assert.Equal(t, "cancelled", status)
+}
+
+// No pickup code confirmed → no proof the two met → no completed ride (it
+// would unlock ratings and post-ride chat).
+func TestDropoff_RefusedBeforePickup(t *testing.T) {
+	pool, r := setupHandlers(t)
+	driverID, driverTok := testutil.CreateUser(t, pool, "driver", "np-d")
+	passengerID, _ := testutil.CreateUser(t, pool, "passenger", "np-p")
+	reqID, _, err := services.CreateRideRequest(driverID, passengerID, 50, 20)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx(t), `UPDATE ride_requests SET status = 'accepted' WHERE id = $1`, reqID)
+	require.NoError(t, err)
+
+	w := testutil.PostJSON(t, r, "/driver/dropoff/"+reqID, driverTok, nil)
+	require.Equal(t, http.StatusConflict, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "not_picked_up")
+
+	var status string
+	require.NoError(t, pool.QueryRow(ctx(t), `SELECT status FROM ride_requests WHERE id = $1`, reqID).Scan(&status))
+	assert.Equal(t, "accepted", status)
+}
+
+// Ending the day completes rides that were picked up and cancels the ones
+// that never were.
+func TestEndDay_CompletesPickedUpCancelsTheRest(t *testing.T) {
+	pool, r := setupHandlers(t)
+	driverID, driverTok := testutil.CreateUser(t, pool, "driver", "ed-d")
+	p1, _ := testutil.CreateUser(t, pool, "passenger", "ed-p1")
+	p2, p2Tok := testutil.CreateUser(t, pool, "passenger", "ed-p2")
+	testutil.CreateActiveDriver(t, pool, driverID,
+		testutil.LatLng{Lat: 50, Lng: 20}, testutil.LatLng{Lat: 50, Lng: 20.1},
+		testutil.LineStringWKT([2]float64{20, 50}, [2]float64{20.1, 50}))
+	rideIn, _, err := services.CreateRideRequest(driverID, p1, 50, 20)
+	require.NoError(t, err)
+	rideWait, _, err := services.CreateRideRequest(driverID, p2, 50, 20.01)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx(t), `UPDATE ride_requests SET status = 'in_progress' WHERE id = $1`, rideIn)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx(t), `UPDATE ride_requests SET status = 'accepted' WHERE id = $1`, rideWait)
+	require.NoError(t, err)
+
+	waiting := testutil.DialWS(t, testutil.ServeWS(t, r), p2Tok)
+	w := testutil.PutJSON(t, r, "/driver/status", driverTok, map[string]any{"status": "done"})
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	statusOf := func(id string) (s string, reason *string) {
+		require.NoError(t, pool.QueryRow(ctx(t),
+			`SELECT status, cancel_reason FROM ride_requests WHERE id = $1`, id).Scan(&s, &reason))
+		return
+	}
+	s, _ := statusOf(rideIn)
+	assert.Equal(t, "done", s)
+	s, reason := statusOf(rideWait)
+	assert.Equal(t, "cancelled", s)
+	require.NotNil(t, reason)
+	assert.Equal(t, "driver_ended", *reason)
+
+	payload := testutil.ReadEventOfType(t, waiting, 2*time.Second, "ride_cancelled")
+	assert.Equal(t, "driver_ended", payload["cancelled_by"])
 }

@@ -219,6 +219,9 @@ func TestPartialRelay_DropoffStartsLeg2AndLogsOutcomes(t *testing.T) {
 	evtType, _ = testutil.ReadEvent(t, paxConn, 2*time.Second)
 	require.Equal(t, "driver_response", evtType)
 
+	// Pickup code confirmed: drop-off needs a ride that is in progress.
+	_, err = pool.Exec(ctx(t), `UPDATE ride_requests SET status = 'in_progress' WHERE id = $1`, reqID)
+	require.NoError(t, err)
 	w = testutil.PostJSON(t, r, "/driver/dropoff/"+reqID, driverTok, map[string]any{})
 	require.Equal(t, http.StatusOK, w.Code)
 

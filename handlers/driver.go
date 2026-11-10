@@ -538,14 +538,23 @@ func UpdateStatus(c *gin.Context) {
 		return
 	}
 	if req.Status == "done" {
-		// "End driving day" — bulk-complete every remaining active ride
-		// (accepted OR in_progress) in ONE statement so rides accepted
-		// concurrently can't slip past the notification loop. Per-passenger
-		// drop-off uses DropoffPassenger instead.
+		// "End driving day" — settle every remaining active ride in ONE
+		// statement so rides accepted concurrently can't slip past the
+		// notification loop. Picked-up rides (in_progress) complete; rides
+		// still waiting for pickup (accepted) are cancelled, since nothing
+		// shows the two ever met. Per-passenger drop-off uses
+		// DropoffPassenger instead.
 		rows, err := db.DB.Query(context.Background(), `
-			UPDATE ride_requests SET status = 'done'
-			WHERE driver_id = $1 AND status IN ('accepted','in_progress')
-			RETURNING id, passenger_id, match_kind
+			WITH done AS (
+				UPDATE ride_requests SET status = 'done'
+				WHERE driver_id = $1 AND status = 'in_progress'
+				RETURNING id, passenger_id, match_kind, TRUE AS completed
+			), cancelled AS (
+				UPDATE ride_requests SET status = 'cancelled', cancel_reason = 'driver_ended'
+				WHERE driver_id = $1 AND status = 'accepted'
+				RETURNING id, passenger_id, match_kind, FALSE AS completed
+			)
+			SELECT * FROM done UNION ALL SELECT * FROM cancelled
 		`, driverID)
 		if err == nil {
 			// Drain the cursor FIRST, then act. The UPDATE has already
@@ -554,11 +563,14 @@ func UpdateStatus(c *gin.Context) {
 			// connection open and — worse — an error mid-stream used to exit
 			// the loop silently, leaving rides marked done in the database with
 			// no notification, no trip record, and a 200 on the response.
-			type doneRide struct{ ReqID, PassengerID, MatchKind string }
+			type doneRide struct {
+				ReqID, PassengerID, MatchKind string
+				Completed                     bool
+			}
 			var done []doneRide
 			for rows.Next() {
 				var d doneRide
-				if err := rows.Scan(&d.ReqID, &d.PassengerID, &d.MatchKind); err != nil {
+				if err := rows.Scan(&d.ReqID, &d.PassengerID, &d.MatchKind, &d.Completed); err != nil {
 					log.Printf("UpdateStatus: scan done row for %s: %v", driverID, err)
 					continue
 				}
@@ -574,6 +586,13 @@ func UpdateStatus(c *gin.Context) {
 					driverID, rowsErr)
 			}
 			for _, d := range done {
+				if !d.Completed {
+					Hub.SendToUser(d.PassengerID, "ride_cancelled", gin.H{
+						"request_id": d.ReqID, "cancelled_by": "driver_ended",
+					})
+					logMatchEvent(d.ReqID, "cancelled", map[string]any{"by": "driver", "reason": "driver_ended"})
+					continue
+				}
 				if req.DistanceKm > 0 {
 					if err := services.RecordCompletedTrip(d.ReqID, driverID, d.PassengerID, req.DistanceKm); err != nil {
 						log.Printf("UpdateStatus: record trip %s: %v", d.ReqID, err)
@@ -659,7 +678,17 @@ func DropoffPassenger(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
-	if status != "accepted" && status != "in_progress" {
+	if status == "accepted" {
+		// No pickup code was confirmed, so there is no proof the two met.
+		// Completing it would unlock ratings and post-ride chat for a ride
+		// that never happened; cancel or report a no-show instead.
+		c.JSON(http.StatusConflict, gin.H{
+			"error": "passenger not picked up yet: confirm the pickup code, or cancel / report a no-show",
+			"code":  "not_picked_up",
+		})
+		return
+	}
+	if status != "in_progress" {
 		c.JSON(http.StatusConflict, gin.H{"error": "ride is not active"})
 		return
 	}
