@@ -162,6 +162,9 @@ func SetRoute(c *gin.Context) {
 	oLat, oLng := *req.OriginLat, *req.OriginLng
 	dLat, dLng := *req.DestinationLat, *req.DestinationLng
 
+	if !inServiceArea(c, [2]float64{oLat, oLng}, [2]float64{dLat, dLng}) {
+		return
+	}
 	driverID := c.GetString("user_id")
 	if !driverReady(c.Request.Context(), c, driverID) {
 		return

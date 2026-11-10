@@ -33,6 +33,8 @@ export DB_USER=postgres
 export DB_PASSWORD=password
 export DB_NAME=rideshare
 export JWT_SECRET="${JWT_SECRET:-local-dev-secret-not-for-prod}"
+# Same launch areas as production (Kraków + ~30 km, Poltava oblast).
+export SERVICE_AREAS="${SERVICE_AREAS-krakow:49.80,19.45,50.33,20.40;poltava:48.70,32.00,50.95,35.60}"
 
 echo "backend → http://localhost:${PORT} (emulator: http://10.0.2.2:${PORT})"
 exec go run .

@@ -37,6 +37,9 @@ func PassengerUpdateLocation(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "coordinates out of range"})
 		return
 	}
+	if !inServiceArea(c, [2]float64{*req.Lat, *req.Lng}) {
+		return
+	}
 	lat, lng := *req.Lat, *req.Lng
 	passengerID := c.GetString("user_id")
 	if err := services.UpsertActivePassenger(passengerID, lat, lng); err != nil {
@@ -330,6 +333,9 @@ func NearbyDrivers(c *gin.Context) {
 	}
 	if !validLatLng(*req.Lat, *req.Lng) || !validLatLng(req.DestLat, req.DestLng) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "coordinates out of range"})
+		return
+	}
+	if !inServiceArea(c, [2]float64{*req.Lat, *req.Lng}) {
 		return
 	}
 	if req.RadiusKm <= 0 {

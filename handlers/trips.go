@@ -42,6 +42,9 @@ func PlanTrip(c *gin.Context) {
 		req.CorridorKm = 2.0
 	}
 
+	if !inServiceArea(c, [2]float64{*req.OriginLat, *req.OriginLng}, [2]float64{*req.DestLat, *req.DestLng}) {
+		return
+	}
 	driverID := c.GetString("user_id")
 	if !driverReady(c.Request.Context(), c, driverID) {
 		return

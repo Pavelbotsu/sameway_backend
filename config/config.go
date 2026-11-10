@@ -123,6 +123,10 @@ type Config struct {
 	// An accepted ride never picked up is cancelled after this long, so a
 	// forgotten ride doesn't hold a seat (and the passenger) forever.
 	AcceptedTimeoutMinutes int
+
+	// ServiceAreas limits where routes can start/end and passengers can
+	// search (SERVICE_AREAS, see areas.go). Empty = no limit.
+	ServiceAreas []Area
 }
 
 var C Config
@@ -199,6 +203,7 @@ func Load() {
 		MatchNoShowWaitS:       getEnvFloat("MATCH_NO_SHOW_WAIT_S", 300),
 		AcceptedTimeoutMinutes: getEnvInt("ACCEPTED_TIMEOUT_MINUTES", 60),
 	}
+	C.ServiceAreas = loadServiceAreas(C.IsProd())
 }
 
 // IsProd reports whether the server runs in production mode.
@@ -210,6 +215,9 @@ func (c Config) IsProd() bool {
 // Called from main; the server refuses to boot on failure. Dev mode only
 // warns so local setups keep working with zero configuration.
 func (c Config) Validate() error {
+	if serviceAreasErr != nil {
+		return fmt.Errorf("SERVICE_AREAS: %w", serviceAreasErr)
+	}
 	if !c.IsProd() {
 		return nil
 	}
