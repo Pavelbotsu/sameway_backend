@@ -77,19 +77,26 @@ type AccountStatus struct {
 // LoadAccountStatus reads the caller's status. ok=false means no live row
 // (deleted account) or a DB error — callers fail closed.
 func LoadAccountStatus(ctx context.Context, userID string) (st AccountStatus, ok bool) {
+	st, err := ReadAccountStatus(ctx, userID)
+	return st, err == nil
+}
+
+// ReadAccountStatus is LoadAccountStatus with the error kept: pgx.ErrNoRows
+// means the account is gone (deleted), anything else is a DB problem.
+func ReadAccountStatus(ctx context.Context, userID string) (st AccountStatus, err error) {
 	// db.DB is nil only in middleware unit tests, which don't stand up a
 	// database: treat every token there as version 0, consented, active.
 	if db.DB == nil {
-		return AccountStatus{ConsentOK: true}, true
+		return AccountStatus{ConsentOK: true}, nil
 	}
-	err := db.DB.QueryRow(ctx, `
+	err = db.DB.QueryRow(ctx, `
 		SELECT token_version,
 		       terms_version >= $2 AND age_confirmed_at IS NOT NULL,
 		       suspended_at IS NOT NULL
 		FROM users WHERE id = $1 AND deleted_at IS NULL`,
 		userID, models.CurrentTermsVersion,
 	).Scan(&st.TokenVersion, &st.ConsentOK, &st.Suspended)
-	return st, err == nil
+	return st, err
 }
 
 // RequireConsent refuses the ride, chat and rating APIs until the caller has

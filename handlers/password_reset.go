@@ -218,6 +218,8 @@ func ResetPassword(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
+	// Sockets opened with a now-revoked token must not keep receiving events.
+	Hub.Disconnect(userID)
 
 	token, err := middleware.GenerateToken(userID, role)
 	if err != nil {

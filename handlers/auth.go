@@ -460,6 +460,10 @@ func ChangePassword(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
+	// Open sockets were authorised with the old token; close them. Clients
+	// reconnect with whatever token they hold, so a revoked session drops
+	// out and this device reconnects with the fresh token returned below.
+	Hub.Disconnect(userID)
 	// The caller's own token is now stale too, so hand back a fresh one rather
 	// than logging them out of the device they just used.
 	token, err := middleware.GenerateToken(userID, c.GetString("role"))

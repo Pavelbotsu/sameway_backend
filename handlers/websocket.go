@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
@@ -12,6 +14,7 @@ import (
 	"github.com/Pavelbotsu/sameway_backend/models"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"github.com/jackc/pgx/v5"
 )
 
 // Standard gorilla keepalive parameters: the server pings every pingPeriod;
@@ -23,6 +26,12 @@ const (
 	wsPongWait   = 60 * time.Second
 	wsPingPeriod = 54 * time.Second // must be < wsPongWait
 )
+
+// WSAccountRecheck is how often an open socket re-reads its account. Logout,
+// password change and deletion close sockets directly; this catches the rest
+// (suspension set by SQL, token_version bumped elsewhere) within a minute.
+// Variable so tests can shorten it.
+var WSAccountRecheck = time.Minute
 
 var upgrader = websocket.Upgrader{
 	// Mobile app clients send no Origin header. Browser clients do — reject
@@ -218,6 +227,8 @@ func HandleWS(c *gin.Context) {
 	go func() {
 		ticker := time.NewTicker(wsPingPeriod)
 		defer ticker.Stop()
+		recheck := time.NewTicker(WSAccountRecheck)
+		defer recheck.Stop()
 		for {
 			select {
 			case msg, ok := <-client.send:
@@ -236,6 +247,21 @@ func HandleWS(c *gin.Context) {
 				if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 					return
 				}
+			case <-recheck.C:
+				st, err := middleware.ReadAccountStatus(context.Background(), userID)
+				if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+					continue // DB trouble: don't drop every socket, try next time
+				}
+				if err == nil && st.TokenVersion == tv && !st.Suspended {
+					continue
+				}
+				// Session revoked: say so, then close so the reader loop ends
+				// and the deferred unregister runs.
+				conn.WriteControl(websocket.CloseMessage,
+					websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "session revoked"),
+					time.Now().Add(wsWriteWait))
+				conn.Close()
+				return
 			}
 		}
 	}()
