@@ -40,6 +40,11 @@ func Register(c *gin.Context) {
 		})
 		return
 	}
+	if msg := validateRegistration(req.Name, req.Password); msg != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": msg})
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
 
 	// Normalize: the reset/verify flows lower-case emails before lookup, so a
 	// mixed-case registration would otherwise never be able to reset its
@@ -99,6 +104,9 @@ func Login(c *gin.Context) {
 		emailAddr,
 	).Scan(&id, &hash, &role, &name, &suspended)
 	if err != nil {
+		// Spend the same bcrypt time as a wrong password, so response time
+		// doesn't reveal whether the email has an account.
+		_ = bcrypt.CompareHashAndPassword(dummyHash(), []byte(req.Password))
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return
 	}
@@ -417,6 +425,10 @@ func ChangePassword(c *gin.Context) {
 	}
 	if req.NewPassword == req.CurrentPassword {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "new password must differ from current"})
+		return
+	}
+	if len(req.NewPassword) > maxPasswordBytes {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "password is too long (max 72 bytes)"})
 		return
 	}
 	userID := c.GetString("user_id")

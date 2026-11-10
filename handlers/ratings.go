@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/Pavelbotsu/sameway_backend/db"
 	"github.com/gin-gonic/gin"
@@ -22,6 +24,11 @@ func SubmitRating(c *gin.Context) {
 		return
 	}
 
+	req.Comment = strings.TrimSpace(req.Comment)
+	if utf8.RuneCountInString(req.Comment) > maxRatingCommentLen {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "comment is too long (max 500 characters)"})
+		return
+	}
 	raterID := c.GetString("user_id")
 	if raterID == req.RatedID {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot rate yourself"})

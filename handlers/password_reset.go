@@ -148,6 +148,10 @@ func ResetPassword(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "password must be at least 6 characters"})
 		return
 	}
+	if len(req.NewPassword) > maxPasswordBytes {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "password is too long (max 72 bytes)"})
+		return
+	}
 	emailAddr := strings.ToLower(strings.TrimSpace(req.Email))
 	code := strings.TrimSpace(req.Code)
 	ctx := c.Request.Context()
