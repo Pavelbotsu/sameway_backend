@@ -248,7 +248,9 @@ func GetMyRequests(c *gin.Context) {
 		       COALESCE(u.car_make,''), COALESCE(u.car_model,''),
 		       COALESCE(u.car_color,''), COALESCE(u.car_plate,''),
 		       COALESCE(u.photo_url,''),
-		       rr.picked_up_at
+		       rr.picked_up_at,
+		       CASE WHEN u.birth_date IS NOT NULL
+		            THEN DATE_PART('year', AGE(u.birth_date))::int END
 		FROM ride_requests rr
 		JOIN users u ON u.id = rr.driver_id
 		LEFT JOIN ratings r ON r.rated_id = rr.driver_id
@@ -256,7 +258,7 @@ func GetMyRequests(c *gin.Context) {
 		  AND rr.status IN ('offered','pending','accepted','in_progress')
 		GROUP BY rr.id, rr.driver_id, rr.status, rr.created_at,
 		         u.name, u.car_make, u.car_model, u.car_color, u.car_plate,
-		         u.photo_url, rr.picked_up_at
+		         u.photo_url, rr.picked_up_at, u.birth_date
 		ORDER BY rr.created_at DESC
 	`, passengerID)
 	if err != nil {
@@ -274,11 +276,12 @@ func GetMyRequests(c *gin.Context) {
 		var carMake, carModel, carColor, carPlate, photoURL string
 		var createdAt time.Time
 		var pickedUpAt *time.Time
+		var age *int
 		var avg float64
 		var count int
 		if err := rows.Scan(&id, &driverID, &status, &createdAt, &name,
 			&avg, &count, &carMake, &carModel, &carColor, &carPlate,
-			&photoURL, &pickedUpAt); err != nil {
+			&photoURL, &pickedUpAt, &age); err != nil {
 			continue
 		}
 		entry := gin.H{
@@ -298,6 +301,9 @@ func GetMyRequests(c *gin.Context) {
 		// rule as the WS payloads (nearby / offer / decline carry neither).
 		if status == "accepted" || status == "in_progress" {
 			entry["car_plate"] = carPlate
+			if age != nil {
+				entry["driver_age"] = *age
+			}
 		} else {
 			entry["driver_name"] = firstName(name)
 		}

@@ -27,7 +27,7 @@ func ExportData(c *gin.Context) {
 			SELECT id, name, email, role, phone, bio, car_make, car_model,
 			       car_color, car_plate, photo_url, created_at, email_verified_at,
 			       terms_version, terms_accepted_at, age_confirmed_at,
-			       allow_micro_detour
+			       birth_date, allow_micro_detour
 			FROM users WHERE id = $1`},
 		{"rides", `
 			SELECT id,

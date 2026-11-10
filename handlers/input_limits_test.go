@@ -15,7 +15,7 @@ import (
 func registerBody(name, email, password string) map[string]any {
 	return map[string]any{
 		"name": name, "email": email, "password": password, "role": "passenger",
-		"accept_terms": true, "age_confirmed": true,
+		"accept_terms": true, "age_confirmed": true, "birth_date": "1990-01-01",
 	}
 }
 

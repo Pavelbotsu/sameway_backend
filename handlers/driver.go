@@ -1156,6 +1156,7 @@ func driverRespondAccept(c *gin.Context, driverID, requestID string) {
 		"car_color":           carColor,
 		"car_plate":           carPlate,
 		"status":              "accepted",
+		"driver_age":          userAge(ctx, driverID),
 	})
 	for _, b := range bumpedRows {
 		// Drivers only ever saw pending/accepted rows; 'offered' rows lived
@@ -1192,4 +1193,15 @@ func loadDriverProfile(driverID string) (name string, avgRating float64, ratingC
 		GROUP BY u.id, u.name, u.car_make, u.car_model, u.car_color, u.car_plate, u.photo_url
 	`, driverID).Scan(&name, &carMake, &carModel, &carColor, &carPlate, &photoURL, &avgRating, &ratingCount)
 	return
+}
+
+// userAge returns the user's age in years, or nil when no date of birth is
+// on file. Only ever sent to the other party of an accepted ride.
+func userAge(ctx context.Context, userID string) *int {
+	var age *int
+	_ = db.DB.QueryRow(ctx, `
+		SELECT CASE WHEN birth_date IS NOT NULL
+		            THEN DATE_PART('year', AGE(birth_date))::int END
+		FROM users WHERE id = $1`, userID).Scan(&age)
+	return age
 }

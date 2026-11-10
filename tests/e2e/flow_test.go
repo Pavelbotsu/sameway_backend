@@ -48,7 +48,7 @@ func register(t *testing.T, r *gin.Engine, role, email string) (id, token string
 	w := testutil.PostJSON(t, r, "/auth/register", "", map[string]any{
 		"name": email, "email": email,
 		"password": "test-pass-1", "role": role,
-		"accept_terms": true, "age_confirmed": true,
+		"accept_terms": true, "age_confirmed": true, "birth_date": "1990-01-01",
 	})
 	require.Equal(t, http.StatusCreated, w.Code, "register: %s", w.Body.String())
 	var body map[string]any

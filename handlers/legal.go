@@ -5,6 +5,7 @@ import (
 	"embed"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/Pavelbotsu/sameway_backend/db"
 	"github.com/Pavelbotsu/sameway_backend/models"
@@ -47,8 +48,20 @@ var TermsOfService = serveStatic("terms.html")
 func needsConsent(ctx context.Context, userID string) bool {
 	var needs bool
 	if err := db.DB.QueryRow(ctx, `
-		SELECT terms_version < $2 OR age_confirmed_at IS NULL
+		SELECT terms_version < $2 OR age_confirmed_at IS NULL OR birth_date IS NULL
 		FROM users WHERE id = $1`, userID, CurrentTermsVersion,
+	).Scan(&needs); err != nil {
+		return true
+	}
+	return needs
+}
+
+// needsBirthDate reports whether the consent screen must also ask for the
+// date of birth (accounts created before it was collected).
+func needsBirthDate(ctx context.Context, userID string) bool {
+	var needs bool
+	if err := db.DB.QueryRow(ctx,
+		`SELECT birth_date IS NULL FROM users WHERE id = $1`, userID,
 	).Scan(&needs); err != nil {
 		return true
 	}
@@ -62,6 +75,9 @@ func AcceptTerms(c *gin.Context) {
 	var req struct {
 		AcceptTerms  bool `json:"accept_terms"`
 		AgeConfirmed bool `json:"age_confirmed"`
+		// Required when the account has no date of birth yet; ignored
+		// otherwise (it can't be changed here once set).
+		BirthDate string `json:"birth_date"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -75,13 +91,24 @@ func AcceptTerms(c *gin.Context) {
 		return
 	}
 	userID := c.GetString("user_id")
-	if _, err := db.DB.Exec(c.Request.Context(), `
+	ctx := c.Request.Context()
+	var birthDate *time.Time
+	if needsBirthDate(ctx, userID) {
+		d, code, msg := parseBirthDate(req.BirthDate, time.Now())
+		if code != "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": msg, "code": code})
+			return
+		}
+		birthDate = &d
+	}
+	if _, err := db.DB.Exec(ctx, `
 		UPDATE users
 		SET terms_version     = $2,
 		    terms_accepted_at = NOW(),
-		    age_confirmed_at  = COALESCE(age_confirmed_at, NOW())
+		    age_confirmed_at  = COALESCE(age_confirmed_at, NOW()),
+		    birth_date        = COALESCE(birth_date, $3)
 		WHERE id = $1 AND deleted_at IS NULL`,
-		userID, CurrentTermsVersion,
+		userID, CurrentTermsVersion, birthDate,
 	); err != nil {
 		log.Printf("AcceptTerms %s: %v", userID, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})

@@ -255,6 +255,7 @@ func ResetPassword(c *gin.Context) {
 		"email":   emailAddr,
 		// Password reset logs the user in, so it reports consent state the
 		// same way /auth/login does.
-		"needs_consent": needsConsent(ctx, userID),
+		"needs_consent":    needsConsent(ctx, userID),
+		"needs_birth_date": needsBirthDate(ctx, userID),
 	})
 }

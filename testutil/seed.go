@@ -26,8 +26,8 @@ func CreateUser(t testing.TB, pool *pgxpool.Pool, role, name string) (id, token 
 
 	err = pool.QueryRow(context.Background(), `
 		INSERT INTO users (name, email, password, role,
-		                   terms_version, terms_accepted_at, age_confirmed_at)
-		VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+		                   terms_version, terms_accepted_at, age_confirmed_at, birth_date)
+		VALUES ($1, $2, $3, $4, $5, NOW(), NOW(), DATE '1990-01-01')
 		RETURNING id
 	`, name, name+"@test.local", string(hash), role, models.CurrentTermsVersion).Scan(&id)
 	require.NoError(t, err, "insert user %q", name)

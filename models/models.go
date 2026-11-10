@@ -15,7 +15,10 @@ const (
 //
 // Lives here rather than in handlers so middleware can use it without an
 // import cycle.
-const CurrentTermsVersion = 1
+//
+// v2 (2026-11): full Terms/Privacy texts, date of birth required, driver
+// declaration.
+const CurrentTermsVersion = 2
 
 const (
 	StatusLooking    = "looking"
@@ -83,19 +86,21 @@ type ActivePassenger struct {
 }
 
 type RideRequest struct {
-	ID                   string     `json:"id"`
-	DriverID             string     `json:"driver_id"`
-	PassengerID          string     `json:"passenger_id"`
-	PickupLat            float64    `json:"pickup_lat"`
-	PickupLng            float64    `json:"pickup_lng"`
-	Status               string     `json:"status"`
-	CreatedAt            time.Time  `json:"created_at"`
-	PassengerName        string     `json:"passenger_name,omitempty"`
-	PassengerPhotoURL    string     `json:"passenger_photo_url,omitempty"`
-	PassengerAvgRating   float64    `json:"passenger_avg_rating,omitempty"`
-	PassengerRatingCount int        `json:"passenger_rating_count,omitempty"`
-	PickupCode           string     `json:"pickup_code,omitempty"`
-	PickedUpAt           *time.Time `json:"picked_up_at,omitempty"`
+	ID                   string    `json:"id"`
+	DriverID             string    `json:"driver_id"`
+	PassengerID          string    `json:"passenger_id"`
+	PickupLat            float64   `json:"pickup_lat"`
+	PickupLng            float64   `json:"pickup_lng"`
+	Status               string    `json:"status"`
+	CreatedAt            time.Time `json:"created_at"`
+	PassengerName        string    `json:"passenger_name,omitempty"`
+	PassengerPhotoURL    string    `json:"passenger_photo_url,omitempty"`
+	PassengerAvgRating   float64   `json:"passenger_avg_rating,omitempty"`
+	PassengerRatingCount int       `json:"passenger_rating_count,omitempty"`
+	// Only set once the ride is accepted (see GetDriverRequests).
+	PassengerAge *int       `json:"passenger_age,omitempty"`
+	PickupCode   string     `json:"pickup_code,omitempty"`
+	PickedUpAt   *time.Time `json:"picked_up_at,omitempty"`
 	// Round 2 match labeling. Detour* are only set for micro_detour rows —
 	// the driver's request tile shows "adds ~X m / Y s" from these before
 	// they confirm (never-silent disclosure).

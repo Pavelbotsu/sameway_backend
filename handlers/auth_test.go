@@ -43,7 +43,7 @@ func TestRegister_Valid(t *testing.T) {
 	w := testutil.PostJSON(t, r, "/auth/register", "", map[string]any{
 		"name": "Alice", "email": "alice@x.com",
 		"password": "secret123", "role": "passenger",
-		"accept_terms": true, "age_confirmed": true,
+		"accept_terms": true, "age_confirmed": true, "birth_date": "1990-01-01",
 	})
 	assert.Equal(t, http.StatusCreated, w.Code)
 	var body map[string]any
@@ -57,7 +57,7 @@ func TestRegister_DuplicateEmail(t *testing.T) {
 	body := map[string]any{
 		"name": "A", "email": "dup@x.com",
 		"password": "secret123", "role": "passenger",
-		"accept_terms": true, "age_confirmed": true,
+		"accept_terms": true, "age_confirmed": true, "birth_date": "1990-01-01",
 	}
 	w1 := testutil.PostJSON(t, r, "/auth/register", "", body)
 	require.Equal(t, http.StatusCreated, w1.Code)
@@ -70,7 +70,7 @@ func TestRegister_BadPassword(t *testing.T) {
 	w := testutil.PostJSON(t, r, "/auth/register", "", map[string]any{
 		"name": "A", "email": "a@x.com",
 		"password": "short", "role": "passenger",
-		"accept_terms": true, "age_confirmed": true,
+		"accept_terms": true, "age_confirmed": true, "birth_date": "1990-01-01",
 	})
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
@@ -80,7 +80,7 @@ func TestRegister_BadEmail(t *testing.T) {
 	w := testutil.PostJSON(t, r, "/auth/register", "", map[string]any{
 		"name": "A", "email": "not-an-email",
 		"password": "secret123", "role": "driver",
-		"accept_terms": true, "age_confirmed": true,
+		"accept_terms": true, "age_confirmed": true, "birth_date": "1990-01-01",
 	})
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
@@ -92,7 +92,7 @@ func TestLogin_GoodPassword(t *testing.T) {
 	register := testutil.PostJSON(t, r, "/auth/register", "", map[string]any{
 		"name": "A", "email": "login@x.com",
 		"password": "secret123", "role": "driver",
-		"accept_terms": true, "age_confirmed": true,
+		"accept_terms": true, "age_confirmed": true, "birth_date": "1990-01-01",
 	})
 	require.Equal(t, http.StatusCreated, register.Code)
 
@@ -110,7 +110,7 @@ func TestLogin_BadPassword(t *testing.T) {
 	testutil.PostJSON(t, r, "/auth/register", "", map[string]any{
 		"name": "A", "email": "login2@x.com",
 		"password": "secret123", "role": "driver",
-		"accept_terms": true, "age_confirmed": true,
+		"accept_terms": true, "age_confirmed": true, "birth_date": "1990-01-01",
 	})
 	w := testutil.PostJSON(t, r, "/auth/login", "", map[string]any{
 		"email": "login2@x.com", "password": "WRONG",

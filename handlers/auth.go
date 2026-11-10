@@ -28,6 +28,8 @@ func Register(c *gin.Context) {
 		// timestamp and version so consent can be shown later.
 		AcceptTerms  bool `json:"accept_terms"`
 		AgeConfirmed bool `json:"age_confirmed"`
+		// YYYY-MM-DD. 18+ is enforced on the date, not only on the checkbox.
+		BirthDate string `json:"birth_date"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -38,6 +40,11 @@ func Register(c *gin.Context) {
 			"error": "you must be 18 or older and accept the terms to register",
 			"code":  "consent_required",
 		})
+		return
+	}
+	birthDate, code, msg := parseBirthDate(req.BirthDate, time.Now())
+	if code != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": msg, "code": code})
 		return
 	}
 	if msg := validateRegistration(req.Name, req.Password); msg != "" {
@@ -60,9 +67,9 @@ func Register(c *gin.Context) {
 	var id string
 	err = db.DB.QueryRow(context.Background(),
 		`INSERT INTO users (name, email, password, role,
-		                    terms_version, terms_accepted_at, age_confirmed_at)
-		 VALUES ($1,$2,$3,$4,$5,NOW(),NOW()) RETURNING id`,
-		req.Name, emailAddr, string(hash), req.Role, CurrentTermsVersion,
+		                    terms_version, terms_accepted_at, age_confirmed_at, birth_date)
+		 VALUES ($1,$2,$3,$4,$5,NOW(),NOW(),$6) RETURNING id`,
+		req.Name, emailAddr, string(hash), req.Role, CurrentTermsVersion, birthDate,
 	).Scan(&id)
 	if err != nil {
 		// Only a unique violation means "taken" — anything else is an outage
@@ -82,7 +89,7 @@ func Register(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
-	c.JSON(http.StatusCreated, gin.H{"token": token, "user_id": id, "role": req.Role, "name": req.Name, "email": emailAddr, "needs_consent": false})
+	c.JSON(http.StatusCreated, gin.H{"token": token, "user_id": id, "role": req.Role, "name": req.Name, "email": emailAddr, "needs_consent": false, "needs_birth_date": false})
 }
 
 func Login(c *gin.Context) {
@@ -131,7 +138,8 @@ func Login(c *gin.Context) {
 		"token": token, "user_id": id, "role": role, "name": name, "email": req.Email,
 		// Accounts from before consent existed, or after a Terms version bump:
 		// the app shows the acceptance screen before continuing.
-		"needs_consent": needsConsent(c.Request.Context(), id),
+		"needs_consent":    needsConsent(c.Request.Context(), id),
+		"needs_birth_date": needsBirthDate(c.Request.Context(), id),
 	})
 }
 
@@ -392,7 +400,8 @@ func SwitchRole(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"token": token, "role": req.Role, "user_id": userID,
-		"needs_consent": needsConsent(ctx, userID),
+		"needs_consent":    needsConsent(ctx, userID),
+		"needs_birth_date": needsBirthDate(ctx, userID),
 	})
 }
 

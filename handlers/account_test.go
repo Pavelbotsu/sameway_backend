@@ -46,7 +46,7 @@ func TestRegister_RecordsConsent(t *testing.T) {
 	pool, r := setupHandlers(t)
 	w := testutil.PostJSON(t, r, "/auth/register", "", map[string]any{
 		"name": "A", "email": "rec@x.com", "password": "secret123", "role": "driver",
-		"accept_terms": true, "age_confirmed": true,
+		"accept_terms": true, "age_confirmed": true, "birth_date": "1990-01-01",
 	})
 	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
 	var body map[string]any
@@ -85,7 +85,7 @@ func TestLogin_LegacyAccountNeedsConsentUntilAccepted(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code, "age attestation is required too")
 
 	w = testutil.PostJSON(t, r, "/auth/consent", tok, map[string]any{
-		"accept_terms": true, "age_confirmed": true,
+		"accept_terms": true, "age_confirmed": true, "birth_date": "1990-01-01",
 	})
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	assert.Equal(t, false, login()["needs_consent"])
@@ -212,7 +212,7 @@ func TestDeleteAccount_ScrubsPersonalDataAndRevokesAccess(t *testing.T) {
 	// The address is free to register again.
 	re := testutil.PostJSON(t, r, "/auth/register", "", map[string]any{
 		"name": "New", "email": "pax@test.local", "password": "secret123", "role": "passenger",
-		"accept_terms": true, "age_confirmed": true,
+		"accept_terms": true, "age_confirmed": true, "birth_date": "1990-01-01",
 	})
 	assert.Equal(t, http.StatusCreated, re.Code, re.Body.String())
 }

@@ -604,4 +604,9 @@ const alterSQL = `
 		-- Why a ride ended when it was cancelled by the system or for a no-show
 		-- (no_show, expired): kept for ops review and the no-show rate metric.
 		ALTER TABLE ride_requests ADD COLUMN IF NOT EXISTS cancel_reason TEXT;
+
+		-- Date of birth: 18+ is enforced on it at signup and at the consent
+		-- gate (terms v2). Only the age, never the date, is shown to others,
+		-- and only to the matched party of a ride.
+		ALTER TABLE users ADD COLUMN IF NOT EXISTS birth_date DATE;
 `

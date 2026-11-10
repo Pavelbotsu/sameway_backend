@@ -91,7 +91,8 @@ func ReadAccountStatus(ctx context.Context, userID string) (st AccountStatus, er
 	}
 	err = db.DB.QueryRow(ctx, `
 		SELECT token_version,
-		       terms_version >= $2 AND age_confirmed_at IS NOT NULL,
+		       terms_version >= $2 AND age_confirmed_at IS NOT NULL
+		           AND birth_date IS NOT NULL,
 		       suspended_at IS NOT NULL
 		FROM users WHERE id = $1 AND deleted_at IS NULL`,
 		userID, models.CurrentTermsVersion,

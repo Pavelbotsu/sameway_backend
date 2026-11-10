@@ -645,7 +645,10 @@ func GetDriverRequests(driverID string) ([]models.RideRequest, error) {
 		       (SELECT COUNT(*) FROM ratings WHERE rated_id = rr.passenger_id),
 		       COALESCE(rr.pickup_code, ''), rr.picked_up_at,
 		       rr.match_kind, rr.detour_added_m, rr.detour_added_s,
-		       d.lat, d.lng, d.carry_m
+		       d.lat, d.lng, d.carry_m,
+		       -- Age only once the ride is agreed (never the date itself).
+		       CASE WHEN rr.status IN ('accepted','in_progress') AND u.birth_date IS NOT NULL
+		            THEN DATE_PART('year', AGE(u.birth_date))::int END
 		FROM ride_requests rr
 		JOIN users u ON u.id = rr.passenger_id
 		LEFT JOIN active_drivers ad
@@ -715,6 +718,7 @@ func GetDriverRequests(driverID string) ([]models.RideRequest, error) {
 			&r.PickupCode, &r.PickedUpAt,
 			&r.MatchKind, &r.DetourAddedM, &r.DetourAddedS,
 			&r.DropoffLat, &r.DropoffLng, &r.CarryM,
+			&r.PassengerAge,
 		); err != nil {
 			return nil, err
 		}

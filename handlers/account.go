@@ -142,6 +142,7 @@ func deleteAccount(ctx context.Context, userID string) (notify []func(), err err
 		    fcm_token = NULL,
 		    car_make = '', car_model = '', car_color = '', car_plate = '',
 		    photo_url = NULL, bio = '', phone = '',
+		    birth_date = NULL,
 		    verified = FALSE, email_verified_at = NULL,
 		    allow_micro_detour = FALSE,
 		    token_version = token_version + 1,

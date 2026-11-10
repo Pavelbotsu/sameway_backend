@@ -48,7 +48,7 @@ func TestRequireConsent_BlocksRideAPIsUntilAccepted(t *testing.T) {
 	assert.Equal(t, http.StatusOK, testutil.GetJSON(t, r, "/auth/profile", tok).Code)
 
 	w = testutil.PostJSON(t, r, "/auth/consent", tok, map[string]any{
-		"accept_terms": true, "age_confirmed": true,
+		"accept_terms": true, "age_confirmed": true, "birth_date": "1990-01-01",
 	})
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 
