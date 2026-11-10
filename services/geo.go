@@ -187,6 +187,23 @@ func findPassengersInCorridor(driverID, routeWKT string, corridorKm, destLat, de
 			       ST_InterpolatePoint(rd.route_m, rd.cur_geom)                    AS dt
 			FROM rd
 		),
+		-- Candidate net, computed ONCE: one spatial index scan over
+		-- active_passengers, then users are joined by primary key. Inlined,
+		-- the planner drove the join from a seq scan of users and ran the
+		-- spatial index scan once per user (3 512 loops, 1.28 s at 5k in the
+		-- audit bench). EXISTS(ri) skips the scan when the driver has no
+		-- fresh location.
+		cand AS MATERIALIZED (
+			SELECT ap.passenger_id, ap.location, ap.allow_long_walk,
+			       ap.destination_lat, ap.destination_lng
+			FROM active_passengers ap
+			WHERE EXISTS (SELECT 1 FROM ri)
+			  AND ST_DWithin(ap.location::geography, ST_GeogFromText($2), GREATEST($3::float8, $9::float8))
+			  AND ap.updated_at > NOW() - INTERVAL '10 minutes'
+			  -- Optional single-passenger restriction (reverse trigger); NULL
+			  -- keeps the full-pool behavior byte-identical.
+			  AND ($15::uuid IS NULL OR ap.passenger_id = $15::uuid)
+		),
 		c AS (
 			SELECT u.id, u.name, COALESCE(u.fcm_token,'') AS fcm_token,
 			       ap.location AS pax_loc,
@@ -201,7 +218,7 @@ func findPassengersInCorridor(driverID, routeWKT string, corridorKm, destLat, de
 			            THEN ST_Distance(d.geom::geography,
 			                   ST_Transform(ST_ClosestPoint(ri.route_p,
 			                       ST_Transform(d.geom, 3857)), 4326)::geography) END AS dropoff_off_m
-			FROM active_passengers ap
+			FROM cand ap
 			JOIN users u ON u.id = ap.passenger_id
 			CROSS JOIN ri
 			CROSS JOIN LATERAL (SELECT ST_Transform(ap.location::geometry, 3857) AS p) pp
@@ -209,11 +226,9 @@ func findPassengersInCorridor(driverID, routeWKT string, corridorKm, destLat, de
 			    SELECT ST_SetSRID(ST_MakePoint(ap.destination_lng, ap.destination_lat), 4326) AS geom
 			    WHERE ap.destination_lat IS NOT NULL
 			) d ON TRUE
-			WHERE ST_DWithin(ap.location::geography, ST_GeogFromText($2), GREATEST($3::float8, $9::float8))
-			  AND ap.updated_at > NOW() - INTERVAL '10 minutes'
-			  -- Never match the driver's own passenger row (stale state after a
-			  -- role switch would otherwise let a driver corridor-match themself).
-			  AND u.id <> $1
+			-- Never match the driver's own passenger row (stale state after a
+			-- role switch would otherwise let a driver corridor-match themself).
+			WHERE u.id <> $1
 			  -- A block in either direction ends all contact, not just chat.
 			  AND NOT EXISTS (
 			      SELECT 1 FROM user_blocks b
@@ -229,9 +244,6 @@ func findPassengersInCorridor(driverID, routeWKT string, corridorKm, destLat, de
 			      WHERE rr.passenger_id = u.id
 			        AND rr.status IN ('pending','accepted','in_progress')
 			  )
-			  -- Optional single-passenger restriction (reverse trigger); NULL
-			  -- keeps the full-pool behavior byte-identical.
-			  AND ($15::uuid IS NULL OR u.id = $15::uuid)
 		),
 		s AS (
 			SELECT c.*,
