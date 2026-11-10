@@ -345,6 +345,9 @@ const alterSQL = `
 		-- Brute-force cap on reset / verification codes: the row dies after
 		-- too many wrong guesses, not just on TTL.
 		ALTER TABLE password_resets ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0;
+		-- Daily cap on reset codes per address (handlers.resetMaxCodesPerDay).
+		ALTER TABLE password_resets ADD COLUMN IF NOT EXISTS codes_in_window INT NOT NULL DEFAULT 0;
+		ALTER TABLE password_resets ADD COLUMN IF NOT EXISTS window_started_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 		ALTER TABLE email_verifications ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0;
 
 		-- Mid-ride safety check-in: when a rider answers "no, something's

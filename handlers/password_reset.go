@@ -26,6 +26,10 @@ const (
 	// After this many wrong guesses the code is dead — a 6-digit space must
 	// not be brute-forceable within the TTL.
 	resetMaxAttempts = 5
+	// At most this many codes per address per 24 h. Each code allows
+	// resetMaxAttempts guesses, so without a daily cap the cooldown alone
+	// still allowed ~7 200 guesses a day against one account.
+	resetMaxCodesPerDay = 5
 )
 
 // generateResetCode returns a uniformly-random 6-digit string ("000000" to
@@ -77,17 +81,25 @@ func ForgotPassword(c *gin.Context) {
 	// response above: POST twice, and 200/200 meant "no account" while
 	// 200/429 meant "account exists". We enforce the cooldown by skipping the
 	// send and returning the same success shape.
-	var existingCode string
 	var existingCreatedAt time.Time
+	var codesToday int
 	err := db.DB.QueryRow(ctx,
-		`SELECT code, created_at FROM password_resets WHERE email = $1`, emailAddr,
-	).Scan(&existingCode, &existingCreatedAt)
+		`SELECT created_at,
+		        CASE WHEN window_started_at > NOW() - INTERVAL '24 hours'
+		             THEN codes_in_window ELSE 0 END
+		 FROM password_resets WHERE email = $1`, emailAddr,
+	).Scan(&existingCreatedAt, &codesToday)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
 	now := time.Now()
 	if err == nil && now.Sub(existingCreatedAt) < resetResendCooldown {
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+		return
+	}
+	// Daily cap, same silent 200 for the same reason.
+	if codesToday >= resetMaxCodesPerDay {
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 		return
 	}
@@ -99,8 +111,9 @@ func ForgotPassword(c *gin.Context) {
 	}
 	expires := now.Add(resetCodeTTL)
 	_, err = db.DB.Exec(ctx, `
-		INSERT INTO password_resets (email, code, expires_at, created_at)
-		VALUES ($1, $2, $3, NOW())
+		INSERT INTO password_resets (email, code, expires_at, created_at,
+		                             codes_in_window, window_started_at)
+		VALUES ($1, $2, $3, NOW(), 1, NOW())
 		ON CONFLICT (email) DO UPDATE
 			SET code = EXCLUDED.code,
 			    expires_at = EXCLUDED.expires_at,
@@ -109,7 +122,15 @@ func ForgotPassword(c *gin.Context) {
 			    -- bricked password reset for that address. Every subsequent
 			    -- code -- including ones the real user requested -- hit the
 			    -- attempts cap and returned "request a new code", forever.
-			    attempts = 0
+			    attempts = 0,
+			    -- Count codes in a rolling 24 h window that starts at the
+			    -- first code after the previous window ran out.
+			    codes_in_window = CASE
+			        WHEN password_resets.window_started_at > NOW() - INTERVAL '24 hours'
+			        THEN password_resets.codes_in_window + 1 ELSE 1 END,
+			    window_started_at = CASE
+			        WHEN password_resets.window_started_at > NOW() - INTERVAL '24 hours'
+			        THEN password_resets.window_started_at ELSE NOW() END
 	`, emailAddr, code, expires)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})

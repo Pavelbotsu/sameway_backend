@@ -286,3 +286,40 @@ func TestResetPassword_ShortPassword(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
+
+// Five codes per address per day: each code allows five guesses, so the
+// cooldown alone left thousands of guesses a day against one account.
+func TestForgotPassword_DailyCodeCap(t *testing.T) {
+	pool, r := setupHandlers(t)
+	cap := installSender(t)
+	_, _ = testutil.CreateUser(t, pool, "passenger", "cap-1")
+	const addr = "cap-1@test.local"
+
+	request := func() {
+		t.Helper()
+		// Step past the 60 s resend cooldown.
+		_, err := pool.Exec(ctx(t),
+			`UPDATE password_resets SET created_at = created_at - INTERVAL '2 minutes' WHERE email = $1`, addr)
+		require.NoError(t, err)
+		w := testutil.PostJSON(t, r, "/auth/forgot-password", "", map[string]any{"email": addr})
+		require.Equal(t, http.StatusOK, w.Code, "the cap must not leak via status code")
+	}
+	sent := func() int {
+		time.Sleep(200 * time.Millisecond) // sends are async
+		cap.mu.Lock()
+		defer cap.mu.Unlock()
+		return cap.calls
+	}
+
+	for i := 0; i < 6; i++ {
+		request()
+	}
+	assert.Equal(t, 5, sent(), "sixth code within 24 h must not be sent")
+
+	// A day later the window starts over.
+	_, err := pool.Exec(ctx(t),
+		`UPDATE password_resets SET window_started_at = NOW() - INTERVAL '25 hours' WHERE email = $1`, addr)
+	require.NoError(t, err)
+	request()
+	assert.Equal(t, 6, sent())
+}
