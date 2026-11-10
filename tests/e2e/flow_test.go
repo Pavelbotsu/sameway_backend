@@ -53,7 +53,19 @@ func register(t *testing.T, r *gin.Engine, role, email string) (id, token string
 	require.Equal(t, http.StatusCreated, w.Code, "register: %s", w.Body.String())
 	var body map[string]any
 	testutil.DecodeJSON(t, w, &body)
-	return body["user_id"].(string), body["token"].(string)
+	id, token = body["user_id"].(string), body["token"].(string)
+	if role == "driver" {
+		// What the app asks a new driver for before the first route.
+		w = testutil.PostJSON(t, r, "/auth/driver-declaration", token, map[string]any{
+			"licence": true, "insurance": true, "roadworthy": true, "cost_sharing": true,
+		})
+		require.Equal(t, http.StatusOK, w.Code, "declaration: %s", w.Body.String())
+		w = testutil.PutJSON(t, r, "/auth/profile", token, map[string]any{
+			"car_make": "Skoda", "car_model": "Octavia", "car_color": "Grey", "car_plate": "KR 11111",
+		})
+		require.Equal(t, http.StatusOK, w.Code, "car: %s", w.Body.String())
+	}
+	return id, token
 }
 
 // TestDriverInitiatedFlow exercises: driver sets route → corridor match finds

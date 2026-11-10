@@ -38,7 +38,9 @@ func TestConfigurePool_ZeroKeepsDefaults(t *testing.T) {
 func TestMigratePool_IgnoresStatementTimeout(t *testing.T) {
 	cfg, err := pgxpool.ParseConfig(dbPool.Config().ConnString())
 	require.NoError(t, err)
-	db.ConfigurePool(cfg, 4, 1) // 1 ms: anything real would time out
+	// 100 ms: far shorter than the boot DDL, but not so short that connection
+	// setup itself times out on a loaded machine (1 ms was flaky).
+	db.ConfigurePool(cfg, 4, 100)
 	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	require.NoError(t, err)
 	defer pool.Close()

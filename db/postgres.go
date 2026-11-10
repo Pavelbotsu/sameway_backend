@@ -609,4 +609,10 @@ const alterSQL = `
 		-- gate (terms v2). Only the age, never the date, is shown to others,
 		-- and only to the matched party of a ride.
 		ALTER TABLE users ADD COLUMN IF NOT EXISTS birth_date DATE;
+
+		-- Driver declaration (licence, insurance, roadworthy car, cost-sharing
+		-- only), required before publishing a route. Self-declared, like
+		-- BlaBlaCar; documents are not checked.
+		ALTER TABLE users ADD COLUMN IF NOT EXISTS driver_declared_at TIMESTAMPTZ;
+		ALTER TABLE users ADD COLUMN IF NOT EXISTS driver_declaration_version INT;
 `

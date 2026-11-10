@@ -20,6 +20,11 @@ const (
 // declaration.
 const CurrentTermsVersion = 2
 
+// CurrentDriverDeclarationVersion is the version of the driver declaration
+// (licence, insurance, roadworthy car, cost-sharing only). Bumping it asks
+// every driver to confirm again before publishing a route.
+const CurrentDriverDeclarationVersion = 1
+
 const (
 	StatusLooking    = "looking"
 	StatusFull       = "full"

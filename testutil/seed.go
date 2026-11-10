@@ -26,10 +26,14 @@ func CreateUser(t testing.TB, pool *pgxpool.Pool, role, name string) (id, token 
 
 	err = pool.QueryRow(context.Background(), `
 		INSERT INTO users (name, email, password, role,
-		                   terms_version, terms_accepted_at, age_confirmed_at, birth_date)
-		VALUES ($1, $2, $3, $4, $5, NOW(), NOW(), DATE '1990-01-01')
+		                   terms_version, terms_accepted_at, age_confirmed_at, birth_date,
+		                   driver_declared_at, driver_declaration_version,
+		                   car_make, car_model, car_color, car_plate)
+		VALUES ($1, $2, $3, $4, $5, NOW(), NOW(), DATE '1990-01-01',
+		        NOW(), $6, 'Skoda', 'Octavia', 'Grey', 'KR 00000')
 		RETURNING id
-	`, name, name+"@test.local", string(hash), role, models.CurrentTermsVersion).Scan(&id)
+	`, name, name+"@test.local", string(hash), role, models.CurrentTermsVersion,
+		models.CurrentDriverDeclarationVersion).Scan(&id)
 	require.NoError(t, err, "insert user %q", name)
 
 	tok, err := middleware.GenerateToken(id, role)

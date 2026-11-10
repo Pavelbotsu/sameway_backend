@@ -64,6 +64,9 @@ func Register(r *gin.Engine, o Options) {
 		// Terms/Privacy acceptance + 18+ attestation for accounts that predate
 		// it (or after a CurrentTermsVersion bump).
 		auth.POST("/consent", middleware.Auth(), handlers.AcceptTerms)
+		// Licence / insurance / roadworthy car / cost-sharing, required before
+		// a driver can publish a route or a planned trip.
+		auth.POST("/driver-declaration", middleware.Auth(), handlers.AcceptDriverDeclaration)
 		// In-app account deletion (Play + App Store requirement). Password is
 		// re-checked; the limit just stops a stolen token being used to
 		// brute-force it.

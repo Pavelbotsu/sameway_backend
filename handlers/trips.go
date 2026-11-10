@@ -43,6 +43,9 @@ func PlanTrip(c *gin.Context) {
 	}
 
 	driverID := c.GetString("user_id")
+	if !driverReady(c.Request.Context(), c, driverID) {
+		return
+	}
 
 	route, err := services.GetRoadRoute(*req.OriginLat, *req.OriginLng, *req.DestLat, *req.DestLng)
 	if err != nil {
