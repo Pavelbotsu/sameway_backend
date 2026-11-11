@@ -206,6 +206,8 @@ func SetRoute(c *gin.Context) {
 	// Micro-detour fallback (§2): opt-in, near-miss-only, async — an OSRM
 	// round-trip must not sit on the route-set response.
 	goMatch("micro-detour-pass", func() { runMicroDetourPass(driverID) })
+	// Passengers nearby refresh their map now instead of on their next poll.
+	hintNearbyNow(driverID, oLat, oLng)
 
 	c.JSON(http.StatusOK, gin.H{
 		"route_wkt":      route.WKT,
@@ -485,6 +487,7 @@ func UpdateLocation(c *gin.Context) {
 	if shouldRerunCorridor(driverID, lat, lng) {
 		goMatch("rerunCorridorMatch", func() { rerunCorridorMatch(driverID) })
 	}
+	hintNearbyOnMove(driverID, lat, lng)
 
 	// Live location: relay to the counterparty passenger(s) of any active ride
 	// (accepted = approaching pickup, in_progress = in the car) so their map
@@ -937,6 +940,7 @@ func DeleteRoute(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
+	hintNearbyRouteEnded(driverID)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 

@@ -34,19 +34,29 @@ func DialWS(t testing.TB, wsBase, token string) *websocket.Conn {
 	return conn
 }
 
+// backgroundEvents are hints the server sends on its own (see
+// handlers/nearby_hints.go). Tests about other events skip them.
+var backgroundEvents = map[string]bool{"nearby_changed": true}
+
 // ReadEvent blocks up to `timeout` for the next JSON frame on conn and decodes
-// it. Returns (type, payload). Fails the test on timeout.
+// it, skipping background hints. Returns (type, payload). Fails the test on
+// timeout.
 func ReadEvent(t testing.TB, conn *websocket.Conn, timeout time.Duration) (string, map[string]any) {
 	t.Helper()
 	require.NoError(t, conn.SetReadDeadline(time.Now().Add(timeout)))
-	_, raw, err := conn.ReadMessage()
-	require.NoError(t, err, "read ws message within %s", timeout)
-	var msg struct {
-		Type    string         `json:"type"`
-		Payload map[string]any `json:"payload"`
+	for {
+		_, raw, err := conn.ReadMessage()
+		require.NoError(t, err, "read ws message within %s", timeout)
+		var msg struct {
+			Type    string         `json:"type"`
+			Payload map[string]any `json:"payload"`
+		}
+		require.NoError(t, json.Unmarshal(raw, &msg), "decode ws message: %s", string(raw))
+		if backgroundEvents[msg.Type] {
+			continue
+		}
+		return msg.Type, msg.Payload
 	}
-	require.NoError(t, json.Unmarshal(raw, &msg), "decode ws message: %s", string(raw))
-	return msg.Type, msg.Payload
 }
 
 // ReadEventOfType reads frames until one of the wanted type arrives (skipping
@@ -72,9 +82,18 @@ func ReadEventOfType(t testing.TB, conn *websocket.Conn, timeout time.Duration, 
 func ExpectNoEvent(t testing.TB, conn *websocket.Conn, wait time.Duration) {
 	t.Helper()
 	require.NoError(t, conn.SetReadDeadline(time.Now().Add(wait)))
-	_, _, err := conn.ReadMessage()
-	if err == nil {
-		t.Fatalf("expected no ws event, got one")
+	for {
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		var msg struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(raw, &msg) == nil && backgroundEvents[msg.Type] {
+			continue
+		}
+		t.Fatalf("expected no ws event, got %s", string(raw))
 	}
 	// Any error here is acceptable — it's a timeout/closed/etc. The point is
 	// the read failed to deliver a frame.

@@ -32,6 +32,7 @@ func ReapPendingRideRequests(timeoutMinutes int) {
 			runRetentionDaily()
 			sweepLiveLocThrottle()
 			sweepCorridorRerunThrottle()
+			sweepNearbyHintThrottle()
 			sweepPassengerRerunThrottle()
 			sweepChatRateLimit()
 			middleware.SweepRateLimits()
