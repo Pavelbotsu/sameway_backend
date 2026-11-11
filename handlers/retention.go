@@ -90,6 +90,9 @@ var retentionRules = []retentionRule{
 	{"email_verifications", `
 		DELETE FROM email_verifications WHERE expires_at < NOW()`,
 		nil},
+	{"ride_shares", `
+		DELETE FROM ride_shares WHERE expires_at < NOW()`,
+		nil},
 }
 
 // RunRetentionOnce applies every rule once and returns rows affected per

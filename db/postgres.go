@@ -615,4 +615,14 @@ const alterSQL = `
 		-- BlaBlaCar; documents are not checked.
 		ALTER TABLE users ADD COLUMN IF NOT EXISTS driver_declared_at TIMESTAMPTZ;
 		ALTER TABLE users ADD COLUMN IF NOT EXISTS driver_declaration_version INT;
+
+		-- Live trip-share links (handlers/share.go): a random token per link,
+		-- valid while the ride is ongoing and at most 6 hours.
+		CREATE TABLE IF NOT EXISTS ride_shares (
+			token TEXT PRIMARY KEY,
+			ride_request_id UUID NOT NULL REFERENCES ride_requests(id) ON DELETE CASCADE,
+			created_by UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			expires_at TIMESTAMPTZ NOT NULL
+		);
 `

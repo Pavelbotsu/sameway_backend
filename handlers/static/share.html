@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Sameway — live trip</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  html,body{margin:0;height:100%;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:#14141c;color:#e6e6ee}
+  #map{position:absolute;inset:0 0 auto 0;height:calc(100% - 132px)}
+  #card{position:absolute;left:0;right:0;bottom:0;height:132px;box-sizing:border-box;padding:14px 16px;background:#1d1d28;border-top:1px solid #33334a}
+  h1{font-size:17px;margin:0 0 6px}
+  .row{font-size:14px;color:#b9b9cc;margin:2px 0}
+  .plate{display:inline-block;background:#fff;color:#111;font-weight:700;border-radius:4px;padding:1px 6px;letter-spacing:.5px}
+  .ended{position:absolute;inset:0;display:none;align-items:center;justify-content:center;text-align:center;padding:24px;background:#14141c;font-size:17px}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="card">
+  <h1 id="title">Loading…</h1>
+  <div class="row" id="car"></div>
+  <div class="row" id="seen"></div>
+</div>
+<div class="ended" id="ended"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+// Page for a shared Sameway ride (handlers/share.go). Strings follow the
+// browser language: Polish, Ukrainian, otherwise English.
+(function () {
+  var L10N = {
+    en: {title: function (n) { return n + ' is driving'; }, waiting: 'Waiting for pickup', inRide: 'On the way',
+         seen: function (m) { return 'Car position updated ' + m + ' min ago'; }, noPos: 'Car position not available yet',
+         ended: 'This trip has ended or the link has expired.', unknown: 'This link is not valid.'},
+    pl: {title: function (n) { return n + ' prowadzi'; }, waiting: 'Oczekiwanie na odbiór', inRide: 'W drodze',
+         seen: function (m) { return 'Pozycja auta sprzed ' + m + ' min'; }, noPos: 'Pozycja auta jeszcze niedostępna',
+         ended: 'Ten przejazd się zakończył albo link wygasł.', unknown: 'Ten link jest nieprawidłowy.'},
+    uk: {title: function (n) { return n + ' за кермом'; }, waiting: 'Очікування посадки', inRide: 'У дорозі',
+         seen: function (m) { return 'Позиція авто оновлена ' + m + ' хв тому'; }, noPos: 'Позиція авто ще недоступна',
+         ended: 'Ця поїздка завершилася або посилання застаріло.', unknown: 'Це посилання недійсне.'}
+  };
+  var lang = (navigator.language || 'en').slice(0, 2).toLowerCase();
+  if (lang === 'ru') lang = 'uk';
+  var t = L10N[lang] || L10N.en;
+  document.documentElement.lang = L10N[lang] ? lang : 'en';
+
+  var token = location.pathname.split('/').filter(Boolean).pop();
+  var map = L.map('map', {zoomControl: false}).setView([50.06, 19.94], 12);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'
+  }).addTo(map);
+  var car = null, pickup = null, fitted = false, timer = null;
+
+  function text(id, s) { document.getElementById(id).textContent = s; }
+  function end(msg) {
+    var el = document.getElementById('ended');
+    el.textContent = msg; el.style.display = 'flex';
+    if (timer) clearInterval(timer);
+  }
+
+  function refresh() {
+    fetch('/s/' + token + '/live', {cache: 'no-store'}).then(function (r) {
+      if (r.status === 410) { end(t.ended); return null; }
+      if (!r.ok) { end(t.unknown); return null; }
+      return r.json();
+    }).then(function (d) {
+      if (!d) return;
+      text('title', t.title(d.driver_name) + ' · ' + (d.status === 'in_progress' ? t.inRide : t.waiting));
+      var carEl = document.getElementById('car');
+      carEl.textContent = [d.car_color, d.car_make, d.car_model].filter(Boolean).join(' ') + ' ';
+      if (d.car_plate) {
+        var p = document.createElement('span'); p.className = 'plate'; p.textContent = d.car_plate; carEl.appendChild(p);
+      }
+      var pts = [];
+      if (d.pickup) {
+        if (!pickup) pickup = L.circleMarker([d.pickup.lat, d.pickup.lng], {radius: 7, color: '#2ec4b6'}).addTo(map);
+        pts.push([d.pickup.lat, d.pickup.lng]);
+      }
+      if (d.car) {
+        var ll = [d.car.lat, d.car.lng];
+        if (!car) car = L.circleMarker(ll, {radius: 9, color: '#ffffff', fillColor: '#6c63ff', fillOpacity: 1}).addTo(map);
+        else car.setLatLng(ll);
+        pts.push(ll);
+        var mins = Math.max(0, Math.round((Date.now() - Date.parse(d.car.at)) / 60000));
+        text('seen', t.seen(mins));
+      } else {
+        text('seen', t.noPos);
+      }
+      if (!fitted && pts.length) { map.fitBounds(pts, {padding: [40, 40], maxZoom: 15}); fitted = true; }
+    }).catch(function () { /* offline: try again on the next tick */ });
+  }
+  refresh();
+  timer = setInterval(refresh, 15000);
+})();
+</script>
+</body>
+</html>

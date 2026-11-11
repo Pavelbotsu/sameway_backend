@@ -194,6 +194,12 @@ func Register(r *gin.Engine, o Options) {
 	r.POST("/account/delete", rl("web-delete", 5, time.Minute), handlers.AccountDeleteWeb)
 
 	r.GET("/photos/:file", handlers.ServePhoto)
+	// Live trip sharing: a rider creates a link for a trusted contact; the
+	// page and its data are public to whoever holds the random token.
+	r.POST("/rides/:request_id/share", middleware.Auth(), middleware.RequireConsent(),
+		rl("ride-share", 10, time.Minute), handlers.CreateRideShare)
+	r.GET("/s/:token", rl("share-page", 60, time.Minute), handlers.RideSharePage)
+	r.GET("/s/:token/live", rl("share-live", 60, time.Minute), handlers.RideShareLive)
 	r.GET("/ws", handlers.HandleWS)
 }
 

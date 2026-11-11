@@ -75,7 +75,7 @@ func ResetDB(t testing.TB, pool *pgxpool.Pool) {
 			planned_trips, active_passengers, active_drivers, users,
 			conversations, user_blocks, user_reports,
 			transit_stops, match_events,
-			password_resets, email_verifications
+			password_resets, email_verifications, ride_shares
 		RESTART IDENTITY CASCADE
 	`)
 	require.NoError(t, err, "reset db")
