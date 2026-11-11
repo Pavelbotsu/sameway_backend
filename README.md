@@ -363,6 +363,22 @@ OSRM_REFRESH=1 docker compose -f docker-compose.prod.yml up osrm-data osrm-build
 docker compose -f docker-compose.prod.yml restart osrm-car osrm-foot
 ```
 
+### Admin tool
+
+`/admin` ships in the image (`cmd/admin`). Reports, safety flags and bug
+reports are otherwise read by nobody, so check them regularly:
+
+```bash
+alias admin="docker compose -f docker-compose.prod.yml exec app /admin"
+admin reports            # newest user reports
+admin flags              # ride safety flags
+admin bugs               # bug reports
+admin user someone@example.com
+admin suspend someone@example.com --reason "harassment"   # blocks the account at once
+admin unsuspend someone@example.com
+admin retention          # run the data-retention job now (it also runs daily)
+```
+
 ### Backups
 
 The `backup` service dumps the database once at start-up and then nightly
