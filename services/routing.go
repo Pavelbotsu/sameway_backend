@@ -44,12 +44,26 @@ type RoutingClient interface {
 
 // OSRMClient is the production implementation. BaseURL falls back to
 // config.C.OSRMBaseURL when empty so existing code paths keep working.
+//
+// osrm-routed serves ONE profile per instance and ignores the profile name
+// in the URL, so walking routes need their own server: FootBaseURL (or
+// config.C.OSRMFootBaseURL). Without one, "foot" requests go to the main
+// URL — fine for the public demo, which does honour the profile segment.
 type OSRMClient struct {
-	BaseURL string
-	HTTP    *http.Client
+	BaseURL     string
+	FootBaseURL string
+	HTTP        *http.Client
 }
 
-func (c *OSRMClient) baseURL() string {
+func (c *OSRMClient) baseURL(profile string) string {
+	if profile == "foot" {
+		if c.FootBaseURL != "" {
+			return c.FootBaseURL
+		}
+		if c.BaseURL == "" && config.C.OSRMFootBaseURL != "" {
+			return config.C.OSRMFootBaseURL
+		}
+	}
 	if c.BaseURL != "" {
 		return c.BaseURL
 	}
@@ -114,7 +128,7 @@ func (c *OSRMClient) GetRouteVia(profile string, points ...[2]float64) (*RouteRe
 	// just comes back empty and callers fall back to route-level duration).
 	url := fmt.Sprintf(
 		"%s/route/v1/%s/%s?overview=full&geometries=geojson&annotations=duration",
-		c.baseURL(), profile, strings.Join(waypoints, ";"),
+		c.baseURL(profile), profile, strings.Join(waypoints, ";"),
 	)
 
 	acquireOSRM()

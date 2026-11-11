@@ -54,7 +54,10 @@ To enable FCM in development, drop a `serviceAccountKey.json` next to `main.go` 
 | `JWT_SECRET` | `change-this` | JWT signing secret — **prod refuses to boot with the default** |
 | `JWT_TTL_HOURS` | `720` | Token lifetime (hours) |
 | `FIREBASE_CREDENTIALS_PATH` | `./serviceAccountKey.json` | Service-account JSON; empty/missing → FCM disabled |
-| `OSRM_BASE_URL` | `http://router.project-osrm.org` | OSRM endpoint |
+| `OSRM_BASE_URL` | `http://router.project-osrm.org` | OSRM endpoint (car). Prod compose: the self-hosted `osrm-car` |
+| `OSRM_FOOT_BASE_URL` | _(empty → `OSRM_BASE_URL`)_ | Walking-profile OSRM. Self-hosted OSRM serves one profile per server, so prod sets `osrm-foot` |
+| `SERVICE_AREAS` | _(prod: Kraków + 30 km, Poltava oblast; dev: none)_ | `name:minLat,minLng,maxLat,maxLng;…` — where routes and searches are allowed; empty = no limit |
+| `PHOTO_DIR` | `./data/photos` | Uploaded profile photos (prod: the `photos` volume, included in backups) |
 | `MAX_CORRIDOR_NOTIFICATIONS` | `20` | Max passengers notified per driver SetRoute fanout |
 | `RIDE_REQUEST_TIMEOUT_MINUTES` | `5` | Reaper cancels `pending` ride_requests older than this |
 
@@ -337,19 +340,35 @@ flutter build apk --release --dart-define=API_HOST=sameway.duckdns.org
 
 Notes:
 
-- The stack runs `APP_ENV=dev` because routing still uses the public OSRM demo
-  server, which the prod config gate deliberately rejects. The demo server is
-  rate-limited — self-host OSRM and flip to `APP_ENV=prod` before real load.
+- The stack runs `APP_ENV=prod` with **self-hosted OSRM** (see below); the
+  public demo server is rejected by the prod config gate.
 - `GET /healthz` (unauthenticated) reports DB reachability; the compose
   healthcheck and any orchestrator probe use it.
 - Postgres publishes **no ports**; it is reachable only from the compose
   network.
 
+### Routing data (OSRM)
+
+`osrm-data` downloads the Małopolska and Ukraine extracts from Geofabrik
+(~1 GB), cuts Poltava oblast out of Ukraine and merges them
+(`docker/osrm/fetch-map.sh`); `osrm-build` prepares car and walking routing
+(`docker/osrm/build.sh`); `osrm-car` and `osrm-foot` serve them on the
+internal network. The first `up` takes several minutes; later starts skip
+finished steps. The areas must cover `SERVICE_AREAS` — change both together.
+
+Refresh the map monthly (OpenStreetMap keeps changing):
+
+```bash
+OSRM_REFRESH=1 docker compose -f docker-compose.prod.yml up osrm-data osrm-build
+docker compose -f docker-compose.prod.yml restart osrm-car osrm-foot
+```
+
 ### Backups
 
 The `backup` service dumps the database once at start-up and then nightly
 (`BACKUP_HOUR_UTC`, default 02:00) into `./backups/` on the host, keeping
-`BACKUP_KEEP_DAYS` (default 14) days of `rideshare-*.dump` files.
+`BACKUP_KEEP_DAYS` (default 14) days of `rideshare-*.dump` files. Profile
+photos (the `photos` volume) are archived alongside as `photos-*.tar.gz`.
 
 - **Copy `./backups` off the server** (rclone/rsync to object storage or
   another machine). Backups on the same disk die with it.

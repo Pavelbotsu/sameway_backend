@@ -124,6 +124,10 @@ type Config struct {
 	// forgotten ride doesn't hold a seat (and the passenger) forever.
 	AcceptedTimeoutMinutes int
 
+	// OSRMFootBaseURL: the walking-profile OSRM (OSRM_FOOT_BASE_URL). Empty
+	// = use OSRMBaseURL (only right for servers that honour the profile).
+	OSRMFootBaseURL string
+
 	// PhotoDir holds uploaded profile photos (PHOTO_DIR). Back it up with
 	// the database.
 	PhotoDir string
@@ -155,6 +159,7 @@ func Load() {
 		FirebaseCredPath:          getEnv("FIREBASE_CREDENTIALS_PATH", ""),
 		OSRMBaseURL:               getEnv("OSRM_BASE_URL", "http://router.project-osrm.org"),
 		PhotoDir:                  getEnv("PHOTO_DIR", "./data/photos"),
+		OSRMFootBaseURL:           getEnv("OSRM_FOOT_BASE_URL", ""),
 		MaxCorridorNotifications:  getEnvInt("MAX_CORRIDOR_NOTIFICATIONS", 20),
 		RideRequestTimeoutMinutes: getEnvInt("RIDE_REQUEST_TIMEOUT_MINUTES", 5),
 

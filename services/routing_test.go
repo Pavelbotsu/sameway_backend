@@ -97,3 +97,34 @@ func (s stubRouter) GetRouteVia(_ string, _ ...[2]float64) (*services.RouteResul
 	s.onCall()
 	return &services.RouteResult{}, nil
 }
+
+// Self-hosted OSRM runs one profile per server, so walking routes must go
+// to their own URL.
+func TestOSRMClient_FootUsesItsOwnServer(t *testing.T) {
+	var carHits, footHits int
+	car := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		carHits++
+		_, _ = w.Write([]byte(osrmHappyBody))
+	}))
+	defer car.Close()
+	foot := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		footHits++
+		assert.Contains(t, r.URL.Path, "/route/v1/foot/")
+		_, _ = w.Write([]byte(osrmHappyBody))
+	}))
+	defer foot.Close()
+
+	c := &services.OSRMClient{BaseURL: car.URL, FootBaseURL: foot.URL}
+	_, err := c.GetRoute("foot", 50.0, 20.0, 50.0, 20.1)
+	require.NoError(t, err)
+	_, err = c.GetRoute("driving", 50.0, 20.0, 50.0, 20.1)
+	require.NoError(t, err)
+	assert.Equal(t, 1, footHits)
+	assert.Equal(t, 1, carHits)
+
+	// Without a foot server, walking falls back to the main URL.
+	c = &services.OSRMClient{BaseURL: car.URL}
+	_, err = c.GetRoute("foot", 50.0, 20.0, 50.0, 20.1)
+	require.NoError(t, err)
+	assert.Equal(t, 2, carHits)
+}
