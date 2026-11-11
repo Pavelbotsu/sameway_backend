@@ -188,6 +188,7 @@ func Register(r *gin.Engine, o Options) {
 	// Connect, and the app opens them from signup and settings.
 	r.GET("/legal/privacy", handlers.PrivacyPolicy)
 	r.GET("/legal/terms", handlers.TermsOfService)
+	r.GET("/legal/style.css", handlers.LegalStyle)
 	r.GET("/account/delete", handlers.AccountDeletePage)
 	// Unauthenticated and password-checking: per-IP, like /auth/login.
 	r.POST("/account/delete", rl("web-delete", 5, time.Minute), handlers.AccountDeleteWeb)

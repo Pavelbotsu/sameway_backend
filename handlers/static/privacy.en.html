@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sameway — Privacy Policy</title>
+<link rel="stylesheet" href="/legal/style.css">
+</head>
+<body>
+<!--
+  Written from what the code does (retention: handlers/retention.go; photos:
+  handlers/photos.go; consent: handlers/legal.go). Not legal advice: have it
+  reviewed before a public launch. When the meaning changes, bump
+  models.CurrentTermsVersion and lib/core/legal.dart kTermsVersion.
+-->
+<nav class="langs"><a href="?lang=en">English</a> · <a href="?lang=pl">Polski</a> · <a href="?lang=uk">Українська</a></nav>
+<h1>Privacy Policy</h1>
+<p class="meta">Version 2 · effective November 2026</p>
+
+<h2>1. Who we are</h2>
+<p>Sameway is run by [OPERATOR NAME], [ADDRESS] (“we”). We are the controller of your personal data under the GDPR. Contact for anything about your data: [CONTACT EMAIL].</p>
+
+<h2>2. What Sameway does</h2>
+<p>Sameway connects drivers who are already making a trip with passengers going the same way, in Kraków (with about 30 km around it) and in Poltava oblast, Ukraine. Rides are not paid through Sameway and drivers may only share costs, never earn money. You must be 18 or older to use Sameway.</p>
+
+<h2>3. What we process, why, and for how long</h2>
+<table>
+<tr><th>Data</th><th>Why</th><th>Legal basis (GDPR)</th><th>How long</th></tr>
+<tr><td>Name, email, password (stored only as a bcrypt hash), role, date of birth</td><td>Your account, sign-in, checking you are 18+</td><td>Contract, art. 6(1)(b)</td><td>Until you delete your account</td></tr>
+<tr><td>Your acceptance of these documents and of the 18+ statement, with dates; for drivers, the driver declaration (licence, insurance, roadworthy car, cost-sharing only), with date</td><td>Showing what you agreed to</td><td>Legal obligation and legitimate interest, art. 6(1)(c) and (f)</td><td>Until you delete your account</td></tr>
+<tr><td>Optional profile: photo, short bio, phone, car make/model/colour/plate</td><td>Showing the people you ride with who you are and which car to look for</td><td>Contract</td><td>Until you remove it or delete your account. Photos are stored on our server with all embedded metadata (including GPS position) removed</td></tr>
+<tr><td>Your current location while you look for a ride or drive a route, and during an accepted ride</td><td>Finding people going your way; showing the other person where you are during a ride</td><td>Contract</td><td>The current position is overwritten on every update and deleted when you go offline, or 24 hours after your last update at the latest</td></tr>
+<tr><td>Drivers: location in the background (Android) while a route is active</td><td>Keeping drivers visible to passengers when the screen is off; a permanent notification shows when it runs</td><td>Contract</td><td>Stops when the route ends</td></tr>
+<tr><td>Ride history: who rode with whom, pickup and drop-off points, times, pickup-code confirmation, star ratings and comments, distance</td><td>Running rides, safety, your statistics, trust between users</td><td>Contract; legitimate interest in safety</td><td>3 years after the ride</td></tr>
+<tr><td>Planned trips (drivers)</td><td>Letting passengers find future trips</td><td>Contract</td><td>30 days after the planned time</td></tr>
+<tr><td>Chat messages</td><td>Letting matched users arrange the pickup</td><td>Contract</td><td>12 months after the last message in the conversation; conversations between people who never rode together: 90 days after the last message</td></tr>
+<tr><td>Reports, safety flags, blocks</td><td>Keeping users safe, handling abuse</td><td>Legitimate interest in safety</td><td>Reports and safety flags: 2 years. Blocks: until you remove them</td></tr>
+<tr><td>Bug reports you send (text, app version, device model)</td><td>Fixing problems</td><td>Legitimate interest</td><td>1 year</td></tr>
+<tr><td>Push notification token</td><td>Sending ride and chat notifications</td><td>Contract</td><td>Until you sign out or delete your account</td></tr>
+<tr><td>Usage statistics, crash reports and performance data (Google Firebase)</td><td>Improving the app</td><td>Consent, art. 6(1)(a) — asked on first launch, change it any time in Account &amp; security</td><td>Statistics: 2 months; crash reports: 90 days. Nothing is collected without consent</td></tr>
+<tr><td>Server logs (IP address, time, request path — never message contents)</td><td>Security, fixing faults</td><td>Legitimate interest</td><td>Overwritten automatically; at most the latest 30 MB of logs is kept</td></tr>
+<tr><td>Password-reset and email-verification codes</td><td>Account recovery</td><td>Contract</td><td>Until the code expires (at most 24 hours)</td></tr>
+</table>
+<p>Database backups are kept for 14 days, so deleted data disappears from them within that time.</p>
+
+<h2>4. Who sees your data</h2>
+<ul>
+<li><b>Other users.</b> While a driver has an active route, signed-in passengers nearby see the driver’s first name, photo, rating, car make/model/colour and an approximate route: its start and end are rounded to about 500 m and the route is shortened at both ends, so it doesn’t show exact addresses. Before a ride is agreed, nobody sees your exact address, car plate or age. Once a ride is accepted, the two people in it see each other’s name, photo, rating, age (never the date of birth) and live location, and the passenger sees the car plate.</li>
+<li><b>Service providers</b> who process data for us:
+  <ul>
+  <li>[HOSTING PROVIDER] — our servers and database, in the EU;</li>
+  <li>Google Ireland Ltd / Google LLC (Firebase) — push notifications; with your consent, statistics, crash reports and performance data;</li>
+  <li>Resend, Inc. — sending sign-in and password-reset emails (your email address and the message);</li>
+  <li>map tiles: OpenStreetMap Foundation tile servers and, for the satellite view, Esri — they receive your IP address and the map area you look at;</li>
+  <li>place search: Photon by komoot — receives the text you type into the search box and your IP address.</li>
+  </ul>
+  Route calculation runs on our own servers; no outside routing service sees your trips.</li>
+<li><b>Authorities</b>, when the law requires it (for example a court order).</li>
+</ul>
+<p>We do not sell your data and do not use it for advertising.</p>
+
+<h2>5. Transfers outside the EU</h2>
+<p>Google and Resend may process data in the United States. Transfers are covered by the EU–US Data Privacy Framework and/or the European Commission’s standard contractual clauses. If you use Sameway in Ukraine, your data is processed in the EU under this policy and the GDPR.</p>
+
+<h2>6. Automated decisions</h2>
+<p>Matching drivers and passengers is automatic (based on routes, distances and times). It only suggests rides; it does not produce legal effects for you, and every ride is accepted by the people themselves.</p>
+
+<h2>7. Your rights</h2>
+<p>You can access your data and download a copy (Account &amp; security → Download my data), correct it, delete it (Account &amp; security → Delete account, or on the web at <a href="/account/delete">/account/delete</a>), restrict or object to processing based on legitimate interest, and withdraw consent at any time without affecting earlier processing. Write to [CONTACT EMAIL] for anything else; we answer within one month.</p>
+<p>You can complain to the Polish supervisory authority, the President of the Personal Data Protection Office (UODO, uodo.gov.pl). Users in Ukraine can also contact the Ukrainian Parliament Commissioner for Human Rights (ombudsman.gov.ua).</p>
+
+<h2>8. When you delete your account</h2>
+<p>We delete your profile, photo, date of birth, chats, location, planned trips, blocks, bug reports and rating comments, and the pickup and drop-off points of your rides. We keep an anonymous ID linked to rides, star ratings and safety reports that involve other people, so their history and safety records stay correct; it no longer identifies you. These remain only until their retention periods above end.</p>
+
+<h2>9. Data on your device</h2>
+<p>The app keeps your sign-in token (in Android’s encrypted storage) and your settings on your phone. Our web pages (these documents and the account-deletion page) use no cookies. Analytics identifiers are only created after you consent.</p>
+
+<h2>10. Security</h2>
+<p>All traffic is encrypted (HTTPS). Passwords are stored only as bcrypt hashes. The database is not reachable from the internet, and access to production systems is limited to the operator.</p>
+
+<h2>11. Changes</h2>
+<p>If we change this policy in a way that matters, the app will ask you to review and accept it again before you continue.</p>
+</body>
+</html>

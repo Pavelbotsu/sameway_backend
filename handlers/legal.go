@@ -5,6 +5,7 @@ import (
 	"embed"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Pavelbotsu/sameway_backend/db"
@@ -21,7 +22,7 @@ const CurrentTermsVersion = models.CurrentTermsVersion
 // store listings (Play "privacy policy URL", account-deletion URL) have a
 // stable public address.
 //
-//go:embed static/privacy.html static/terms.html static/delete_account.html
+//go:embed static/*.html static/style.css
 var legalFS embed.FS
 
 func serveStatic(name string) gin.HandlerFunc {
@@ -36,11 +37,62 @@ func serveStatic(name string) gin.HandlerFunc {
 	}
 }
 
-// PrivacyPolicy serves GET /legal/privacy.
-var PrivacyPolicy = serveStatic("privacy.html")
+// PrivacyPolicy serves GET /legal/privacy[?lang=en|pl|uk].
+var PrivacyPolicy = legalDoc("privacy")
 
-// TermsOfService serves GET /legal/terms.
-var TermsOfService = serveStatic("terms.html")
+// TermsOfService serves GET /legal/terms[?lang=en|pl|uk].
+var TermsOfService = legalDoc("terms")
+
+// LegalStyle serves GET /legal/style.css, shared by the documents.
+func LegalStyle(c *gin.Context) {
+	b, err := legalFS.ReadFile("static/style.css")
+	if err != nil {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	c.Header("Cache-Control", "public, max-age=3600")
+	c.Data(http.StatusOK, "text/css; charset=utf-8", b)
+}
+
+// legalLangs are the languages the documents exist in.
+var legalLangs = map[string]bool{"en": true, "pl": true, "uk": true}
+
+// legalLang picks the document language: ?lang= (the app passes its UI
+// language), else the browser's Accept-Language, else English. Russian
+// readers get Ukrainian: the service runs in Poland and Ukraine only.
+func legalLang(c *gin.Context) string {
+	if l := strings.ToLower(c.Query("lang")); legalLangs[l] {
+		return l
+	}
+	for _, part := range strings.Split(c.GetHeader("Accept-Language"), ",") {
+		tag := strings.ToLower(strings.TrimSpace(strings.SplitN(part, ";", 2)[0]))
+		if len(tag) < 2 {
+			continue
+		}
+		l := tag[:2]
+		if l == "ru" {
+			l = "uk"
+		}
+		if legalLangs[l] {
+			return l
+		}
+	}
+	return "en"
+}
+
+// legalDoc serves static/<doc>.<lang>.html in the reader's language.
+func legalDoc(doc string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		b, err := legalFS.ReadFile("static/" + doc + "." + legalLang(c) + ".html")
+		if err != nil {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		c.Header("Cache-Control", "public, max-age=3600")
+		c.Header("Vary", "Accept-Language")
+		c.Data(http.StatusOK, "text/html; charset=utf-8", b)
+	}
+}
 
 // needsConsent reports whether the user still has to accept the current
 // Terms/Privacy version or the 18+ attestation. Errors read as "needs

@@ -28,6 +28,13 @@ services:
   app:
     build: .
     restart: unless-stopped
+    # Logs hold IP addresses and request paths (Privacy Policy: overwritten,
+    # at most 30 MB kept).
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     depends_on:
       db:
         condition: service_healthy
