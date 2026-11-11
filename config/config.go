@@ -82,6 +82,15 @@ type Config struct {
 	// completed a ride are purged (messages cascade) after this many days of
 	// inactivity. Conversations with ride history are kept indefinitely.
 	ChatRetentionNoRideDays int
+
+	// Retention periods (handlers/retention.go, Privacy Policy). Days unless
+	// the name says hours.
+	RetentionRideDays          int
+	RetentionChatDays          int
+	RetentionReportDays        int
+	RetentionBugReportDays     int
+	RetentionLiveLocationHours int
+	RetentionPlannedTripDays   int
 	// ChatCandidateRadiusKm bounds the pre-match gate: a passenger may open a
 	// conversation with a driver only if that driver would appear in their
 	// nearby-drivers result within this radius (mirrors the map view).
@@ -196,7 +205,14 @@ func Load() {
 
 		ChatPreRideMaxPerMin:    getEnvInt("CHAT_PRE_RIDE_MAX_PER_MIN", 5),
 		ChatRetentionNoRideDays: getEnvInt("CHAT_RETENTION_NO_RIDE_DAYS", 90),
-		ChatCandidateRadiusKm:   getEnvFloat("CHAT_CANDIDATE_RADIUS_KM", 10),
+
+		RetentionRideDays:          getEnvInt("RETENTION_RIDE_DAYS", 3*365),
+		RetentionChatDays:          getEnvInt("RETENTION_CHAT_DAYS", 365),
+		RetentionReportDays:        getEnvInt("RETENTION_REPORT_DAYS", 2*365),
+		RetentionBugReportDays:     getEnvInt("RETENTION_BUG_REPORT_DAYS", 365),
+		RetentionLiveLocationHours: getEnvInt("RETENTION_LIVE_LOCATION_HOURS", 24),
+		RetentionPlannedTripDays:   getEnvInt("RETENTION_PLANNED_TRIP_DAYS", 30),
+		ChatCandidateRadiusKm:      getEnvFloat("CHAT_CANDIDATE_RADIUS_KM", 10),
 
 		GTFSStaticURL:        getEnv("GTFS_STATIC_URL", ""),
 		GTFSStopRadiusM:      getEnvFloat("GTFS_STOP_RADIUS_M", 300),

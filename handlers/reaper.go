@@ -29,6 +29,7 @@ func ReapPendingRideRequests(timeoutMinutes int) {
 			ReapStalePendingOnce(timeoutMinutes)
 			ExpireStaleAcceptedOnce(context.Background())
 			ReapIdleConversationsOnce()
+			runRetentionDaily()
 			sweepLiveLocThrottle()
 			sweepCorridorRerunThrottle()
 			sweepPassengerRerunThrottle()
