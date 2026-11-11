@@ -278,6 +278,10 @@ func UpdateProfile(c *gin.Context) {
 		req.Phone = &p
 	}
 	userID := c.GetString("user_id")
+	if req.PhotoURL != nil {
+		// "" = remove the photo: delete our stored file too.
+		removeUserPhoto(c.Request.Context(), userID)
+	}
 	_, err := db.DB.Exec(context.Background(), `
 		UPDATE users SET
 		    name      = COALESCE($1, name),

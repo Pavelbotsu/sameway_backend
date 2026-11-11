@@ -50,7 +50,7 @@ func main() {
 	r := gin.New()
 	// 64 KB is far above any legitimate JSON body here; without a cap a single
 	// request could stream an unbounded body into the JSON decoder.
-	r.Use(middleware.Logger(), gin.Recovery(), middleware.BodyLimit(64<<10))
+	r.Use(middleware.Logger(), gin.Recovery(), routes.BodyLimit())
 	// TLS terminates at the reverse proxy (Caddy), which is the ONLY thing that
 	// can reach this container — docker-compose.prod.yml publishes no ports for
 	// the app service. Trusting the private ranges therefore trusts exactly that

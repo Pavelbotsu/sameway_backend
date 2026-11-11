@@ -53,6 +53,9 @@ func Register(r *gin.Engine, o Options) {
 		auth.GET("/profile", middleware.Auth(), handlers.GetProfile)
 		auth.PUT("/profile", middleware.Auth(),
 			rl("profile", 20, time.Minute), handlers.UpdateProfile)
+		// Stored on our server, metadata stripped (no Firebase Storage).
+		auth.POST("/profile/photo", middleware.Auth(),
+			rl("photo", 10, time.Minute), handlers.UploadProfilePhoto)
 		auth.POST("/switch-role", middleware.Auth(), handlers.SwitchRole)
 		auth.PUT("/fcm-token", middleware.Auth(), handlers.UpdateFCMToken)
 		auth.GET("/stats", middleware.Auth(), handlers.GetStats)
@@ -189,5 +192,14 @@ func Register(r *gin.Engine, o Options) {
 	// Unauthenticated and password-checking: per-IP, like /auth/login.
 	r.POST("/account/delete", rl("web-delete", 5, time.Minute), handlers.AccountDeleteWeb)
 
+	r.GET("/photos/:file", handlers.ServePhoto)
 	r.GET("/ws", handlers.HandleWS)
+}
+
+// BodyLimit is the request-size cap used by the server and the test router:
+// 64 KB for JSON APIs, more for the profile photo upload.
+func BodyLimit() gin.HandlerFunc {
+	return middleware.BodyLimit(64<<10, map[string]int64{
+		"/auth/profile/photo": 3<<20 + 64<<10, // 3 MB image + multipart overhead
+	})
 }

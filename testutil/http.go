@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/Pavelbotsu/sameway_backend/middleware"
 	"github.com/Pavelbotsu/sameway_backend/routes"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -27,7 +26,7 @@ func NewTestRouterWithRateLimits() *gin.Engine { return newTestRouter(true) }
 func newTestRouter(rateLimits bool) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.Use(middleware.BodyLimit(64 << 10))
+	r.Use(routes.BodyLimit())
 	// Dev routes on: tests run with APP_ENV unset (dev), exactly when
 	// main.go registers them too.
 	routes.Register(r, routes.Options{RateLimits: rateLimits, DevRoutes: true})

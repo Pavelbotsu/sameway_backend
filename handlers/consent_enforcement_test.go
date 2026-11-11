@@ -107,18 +107,19 @@ func TestSuspendedAccount_LockedOutExceptDeletion(t *testing.T) {
 
 const firebasePhoto = "https://firebasestorage.googleapis.com/v0/b/sameway.appspot.com/o/user_photos%2Fx.jpg?alt=media&token=abc"
 
+// Photos are set only by the upload endpoint (photos.go); the profile
+// endpoint can only remove one.
 func TestUpdateProfile_SavesPhotoBioPhone(t *testing.T) {
 	pool, r := setupHandlers(t)
 	_, tok := testutil.CreateUser(t, pool, "passenger", "p1")
 
 	w := testutil.PutJSON(t, r, "/auth/profile", tok, map[string]any{
-		"photo_url": firebasePhoto, "bio": "  Commuting to AGH  ", "phone": "+48 600 100 200",
+		"bio": "  Commuting to AGH  ", "phone": "+48 600 100 200",
 	})
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 
 	var prof map[string]any
 	testutil.DecodeJSON(t, testutil.GetJSON(t, r, "/auth/profile", tok), &prof)
-	assert.Equal(t, firebasePhoto, prof["photo_url"])
 	assert.Equal(t, "Commuting to AGH", prof["bio"])
 	assert.Equal(t, "+48 600 100 200", prof["phone"])
 
@@ -136,6 +137,7 @@ func TestUpdateProfile_RejectsBadValues(t *testing.T) {
 	for name, body := range map[string]map[string]any{
 		"foreign photo host": {"photo_url": "https://evil.example.com/x.jpg"},
 		"plain http photo":   {"photo_url": "http://firebasestorage.googleapis.com/x.jpg"},
+		"firebase photo url": {"photo_url": firebasePhoto},
 		"bio too long":       {"bio": strings.Repeat("x", 161)},
 		"phone letters":      {"phone": "call me maybe"},
 		"name too long":      {"name": strings.Repeat("n", 81)},

@@ -35,6 +35,11 @@ var (
 // deleteAccount scrubs userID inside one transaction and returns the WebSocket
 // notifications to send once it has committed.
 func deleteAccount(ctx context.Context, userID string) (notify []func(), err error) {
+	// The photo file is removed after the commit; the URL is read first
+	// because the scrub clears it.
+	var photo *string
+	_ = db.DB.QueryRow(ctx, `SELECT photo_url FROM users WHERE id = $1`, userID).Scan(&photo)
+
 	tx, err := db.DB.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -159,6 +164,9 @@ func deleteAccount(ctx context.Context, userID string) (notify []func(), err err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
+	}
+	if photo != nil {
+		removeStoredPhoto(*photo)
 	}
 	notify = append(notify, func() { Hub.Disconnect(userID) })
 	return notify, nil

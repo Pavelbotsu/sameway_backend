@@ -64,8 +64,11 @@ services:
       - AI_PROVIDER_URL=${AI_PROVIDER_URL:-}
       - AI_PROVIDER_API_KEY=${AI_PROVIDER_API_KEY:-}
       - AI_MODEL_NAME=${AI_MODEL_NAME:-}
+      # Profile photos (uploaded through the API, metadata stripped).
+      - PHOTO_DIR=/data/photos
     volumes:
       - ./serviceAccountKey.json:/secrets/serviceAccountKey.json:ro
+      - photos:/data/photos
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
       interval: 15s
@@ -94,6 +97,7 @@ services:
     volumes:
       - ./backups:/backups
       - ./scripts/backup-loop.sh:/backup-loop.sh:ro
+      - photos:/photos:ro
     entrypoint: ["/bin/bash", "/backup-loop.sh"]
 
   caddy:
@@ -113,5 +117,6 @@ services:
 
 volumes:
   postgres_data:
+  photos:
   caddy_data:
   caddy_config:

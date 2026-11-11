@@ -16,7 +16,14 @@ backup_once() {
   if pg_dump -Fc --no-owner -f "${file}.partial"; then
     mv "${file}.partial" "$file"
     echo "backup: wrote $file ($(du -h "$file" | cut -f1))"
+    # Profile photos live outside the database; archive them alongside.
+    if [ -d /photos ] && tar -czf "/backups/photos-${stamp}.tar.gz.partial" -C /photos . ; then
+      mv "/backups/photos-${stamp}.tar.gz.partial" "/backups/photos-${stamp}.tar.gz"
+    else
+      rm -f "/backups/photos-${stamp}.tar.gz.partial"
+    fi
     find /backups -name 'rideshare-*.dump' -mtime "+${KEEP_DAYS}" -print -delete
+    find /backups -name 'photos-*.tar.gz' -mtime "+${KEEP_DAYS}" -print -delete
   else
     rm -f "${file}.partial"
     echo "backup: pg_dump FAILED at ${stamp}" >&2

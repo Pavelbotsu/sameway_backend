@@ -3,3 +3,6 @@ serviceAccountKey.json
 simulate.exe
 *.exe
 backups/
+
+# Local profile photos (PHOTO_DIR default)
+data/

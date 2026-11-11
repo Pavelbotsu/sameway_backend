@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"net/url"
 	"strings"
 	"unicode/utf8"
 )
@@ -14,7 +13,6 @@ const (
 	maxCarFieldLen = 40
 	maxBioLen      = 160
 	maxPhoneLen    = 32
-	maxPhotoURLLen = 1000
 )
 
 // validateProfileFields returns a user-facing error for the first invalid
@@ -35,7 +33,7 @@ func validateProfileFields(name, carMake, carModel, carColor, carPlate, photoURL
 		return "phone number is invalid"
 	}
 	if photoURL != nil && *photoURL != "" && !validPhotoURL(*photoURL) {
-		return "photo must be uploaded through the app"
+		return "upload photos with POST /auth/profile/photo"
 	}
 	return ""
 }
@@ -62,19 +60,10 @@ func validPhone(p string) bool {
 	return digits >= 6
 }
 
-// validPhotoURL accepts only HTTPS download URLs on Firebase Storage, where
-// the app uploads photos. Any other URL would let a profile point other
-// users' apps at an arbitrary server (tracking pixel, huge file, etc.).
+// validPhotoURL: through the profile endpoint a photo can only be removed
+// (""). New photos go through UploadProfilePhoto, which stores and cleans
+// them; accepting a URL here would let a profile point other users' apps
+// at an arbitrary server (tracking pixel, huge file, etc.).
 func validPhotoURL(raw string) bool {
-	if len(raw) > maxPhotoURLLen {
-		return false
-	}
-	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.User != nil {
-		return false
-	}
-	host := strings.ToLower(u.Hostname())
-	return host == "firebasestorage.googleapis.com" ||
-		host == "storage.googleapis.com" ||
-		strings.HasSuffix(host, ".firebasestorage.app")
+	return raw == ""
 }
