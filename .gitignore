@@ -6,3 +6,6 @@ backups/
 
 # Local profile photos (PHOTO_DIR default)
 data/
+
+# Tester server JWT secret (scripts/tester.sh)
+.tester-jwt-secret
