@@ -9,3 +9,4 @@ data/
 
 # Tester server JWT secret (scripts/tester.sh)
 .tester-jwt-secret
+.env.bak*
