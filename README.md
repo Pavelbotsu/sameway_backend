@@ -356,6 +356,12 @@ Notes:
 internal network. The first `up` takes several minutes; later starts skip
 finished steps. The areas must cover `SERVICE_AREAS` — change both together.
 
+Measured on a trial build (2026-11-13): the merged map is 268 MB and the whole
+build takes ~7 minutes; building needs **~3.5 GB RAM** (walking profile peak
+3.4 GB, car 2.1 GB), the two running servers ~1.2 GB together. On a 2 GB
+VPS add 4 GB of swap for the build, or build elsewhere and copy the `osrm`
+volume. Routes answer in a few milliseconds.
+
 Refresh the map monthly (OpenStreetMap keeps changing):
 
 ```bash
