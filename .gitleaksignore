@@ -1,0 +1,3 @@
+# Known non-secrets (gitleaks fingerprints). Add one only after checking the finding.
+# Test fixture: the new password in the password-reset test.
+3ab4ef854a5482ffee64e720ba9c71410efa6939:handlers/password_reset_test.go:generic-api-key:142
