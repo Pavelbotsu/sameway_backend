@@ -1,5 +1,9 @@
 .env
+.env.*
+!.env.example
+!.env.prod.example
 serviceAccountKey.json
+*firebase-adminsdk*.json
 simulate.exe
 *.exe
 backups/
